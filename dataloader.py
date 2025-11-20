@@ -88,12 +88,12 @@ class DIV2KDataLoader(Dataset):
         y = random.randint(0, h - self.patch_size)
 
         # crop lr img
-        lr_crop = lr.crop((x, y, x + self.patch_size, y + self.patch_size))
+        lr_crop = lr_img.crop((x, y, x + self.patch_size, y + self.patch_size))
 
         # Match crop for hr img
         x_hr = x * self.scale
         y_hr = y * self.scale
-        hr_crop = hr.crop((
+        hr_crop = hr_img.crop((
             x_hr,
             y_hr,
             x_hr + (self.patch_size * self.scale),
