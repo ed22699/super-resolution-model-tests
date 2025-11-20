@@ -187,15 +187,9 @@ def main(args):
         str(log_dir),
         flush_secs=5
     )
-    # TODO continue from here
     trainer = Trainer(
         model, train_loader, val_loader, criterion, optimizer, summary_writer, DEVICE, scheduler
     )
-
-    if args.overfit_batch:
-        print("!!! RUNNING IN OVERFIT BATCH DEBUG MODE !!!")
-        trainer.run_overfit_batch_test(steps=100)
-        return
 
     trainer.train(
         args.epochs,
@@ -204,25 +198,6 @@ def main(args):
         log_frequency=args.log_frequency,
         patience=args.patience,
     )
-
-    # run on test set
-    test_dataset = ProgressionDataset(
-        root_dir=datasetRoot+"/test",
-        mode="test",
-        transform=clean_transform,
-        epoch_size=args.batch_size,
-        label_file=datasetRoot+"/test_labels.txt"
-    )
-
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset,
-        shuffle=False,
-        batch_size=args.batch_size,
-        num_workers=args.worker_count,
-        pin_memory=True,
-    )
-
-    test_model_accuracy(model, test_loader, DEVICE, criterion)
 
     summary_writer.close()
 
@@ -266,17 +241,17 @@ class Trainer:
         for epoch in range(start_epoch, epochs):
             self.model.train()
             data_load_start_time = time.time()
-            for batch_anc, batch_comp, labels in self.train_loader:
-                batch_anc = batch_anc.to(self.device)
-                batch_comp = batch_comp.to(self.device)
-                labels = labels.to(self.device)
+            for batch_lr, batch_hr in self.train_loader:
+                batch_lr = batch_lr.to(self.device)
+                batch_hr = batch_hr.to(self.device)
                 data_load_end_time = time.time()
 
                 # Compute the forward pass of the model
-                logits = self.model.forward(batch_anc, batch_comp)
+                logits = self.model.forward(batch_lr)
 
+                # TODO set up loss to be suitable
                 # Compute the loss
-                loss = self.criterion(logits, labels)
+                loss = self.criterion(logits, batch_hr)
 
                 # Compute the backward pass
                 loss.backward()
@@ -285,6 +260,7 @@ class Trainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
+                # TODO set up accuracy to be suitable
                 with torch.no_grad():
                     preds = logits.argmax(-1)
                     accuracy = compute_accuracy(labels, preds)
@@ -360,7 +336,6 @@ class Trainer:
         # No need to track gradients for validation, we're not optimizing.
         with torch.no_grad():
             for batch_anc, batch_comp, labels in self.val_loader:
-                # for batch_anc, batch_comp, labels in self.test_loader: #For testing if test dataset is correct
                 batch_anc = batch_anc.to(self.device)
                 batch_comp = batch_comp.to(self.device)
                 labels = labels.to(self.device)
