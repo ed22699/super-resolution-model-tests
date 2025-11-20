@@ -27,9 +27,14 @@ class DIV2KDataLoader(Dataset):
         One of {'train', 'val', 'test'} indicating dataset behavior.
     batch_size : int
         In training mode, the number of samples per epoch
+    scale : int
+        In training mode, the difference in scale between the hr image and lr image
+    patch_size : int
+        In training mode, the size of the random cropping window
     """
 
-    def __init__(self, root_dir_lr, root_dir_hr, transform=None, mode='train', batch_size=None):
+    def __init__(self, root_dir_lr, root_dir_hr, transform=None, mode='train', 
+                 batch_size=None, scale = 8, patch_size = 64):
         """
         Initialize the ProgressionDataset.
 
@@ -45,12 +50,18 @@ class DIV2KDataLoader(Dataset):
             One of {'train', 'val', 'test'} indicating dataset behavior.
         batch_size: int
             In training mode, the number of samples per epoch
+        scale : int
+            In training mode, the difference in scale between the hr image and lr image
+        patch_size : int
+            In training mode, the size of the random cropping window
         """
         self.transform = transform
         self.batch_size = batch_size
         self.mode = mode
         self.root_dir_lr = root_dir_lr
         self.root_dir_hr = root_dir_hr
+        self.scale = scale
+        self.patch_size = patch_size
 
         # Iterate through recipe folders and collect ordered step images
         self.lr_image_files = [f for f in os.listdir(
@@ -60,6 +71,35 @@ class DIV2KDataLoader(Dataset):
 
         print(f"Found {len(self.lr_image_files)} images for {self.mode} task.")
         print(f"Found {len(self.hr_image_files)} images for {self.mode} task.")
+
+    def _generate_random_crop(self, lr_img, hr_img):
+        """
+        Randomly selects a cropping position and crops the same for both the 
+        high resolution and low resolution image.
+
+        Returns
+        -------
+        tuple
+            (cropped_img_lr, cropped_img_hr)
+        """
+        # Select crop pos
+        w, h = lr_img.size
+        x = random.randint(0, w - self.patch_size)
+        y = random.randint(0, h - self.patch_size)
+
+        # crop lr img
+        lr_crop = lr.crop((x, y, x + self.patch_size, y + self.patch_size))
+
+        # Match crop for hr img
+        x_hr = x * self.scale
+        y_hr = y * self.scale
+        hr_crop = hr.crop((
+            x_hr,
+            y_hr,
+            x_hr + (self.patch_size * self.scale),
+            y_hr + (self.patch_size * self.scale),
+        ))
+        return lr_crop, hr_crop
 
     def _generate_pair(self):
         """
@@ -118,6 +158,10 @@ class DIV2KDataLoader(Dataset):
 
         img_lr = Image.open(self.root_dir_lr + "/" + img_lr_path).convert("RGB")
         img_hr = Image.open(self.root_dir_hr + "/" + img_hr_path).convert("RGB")
+
+        # Random cropping
+        if self.mode == 'train':
+            img_lr, img_hr = self._generate_random_crop(img_lr, img_hr)
 
         if self.transform:
             img_lr = self.transform(img_lr)
