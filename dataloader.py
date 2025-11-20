@@ -52,9 +52,9 @@ class DIV2KDataLoader(Dataset):
 
         # Iterate through recipe folders and collect ordered step images
         self.lr_image_files = [f for f in os.listdir(
-            root_dir_lr) if f.lower().endswith('.jpg')]
+            root_dir_lr) if f.lower().endswith('.png')]
         self.hr_image_files = [f for f in os.listdir(
-            root_dir_hr) if f.lower().endswith('.jpg')]
+            root_dir_hr) if f.lower().endswith('.png')]
 
         print(f"Found {len(self.lr_image_files)} images for {self.mode} task.")
         print(f"Found {len(self.hr_image_files)} images for {self.mode} task.")
