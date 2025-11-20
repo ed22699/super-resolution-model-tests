@@ -49,6 +49,8 @@ class DIV2KDataLoader(Dataset):
         self.transform = transform
         self.batch_size = batch_size
         self.mode = mode
+        self.root_dir_lr = root_dir_lr
+        self.root_dir_hr = root_dir_hr
 
         # Iterate through recipe folders and collect ordered step images
         self.lr_image_files = [f for f in os.listdir(
@@ -114,8 +116,8 @@ class DIV2KDataLoader(Dataset):
             img_lr_path = self.lr_image_files[idx]
             img_hr_path = self.hr_image_files[idx]
 
-        img_lr = Image.open(img_lr_path).convert("RGB")
-        img_hr = Image.open(img_hr_path).convert("RGB")
+        img_lr = Image.open(self.root_dir_lr + "/" + img_lr_path).convert("RGB")
+        img_hr = Image.open(self.root_dir_hr + "/" + img_hr_path).convert("RGB")
 
         if self.transform:
             img_lr = self.transform(img_lr)
