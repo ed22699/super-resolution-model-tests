@@ -35,13 +35,16 @@ def make_layer(block, n_layers):
 class DenseBlock(nn.Module):
     def __init__(self, channels=64, growth=32, bias=True):
         super().__init__()
-        self.layers = nn.ModuleList(
-            [nn.Conv2d(channels + i * growth, growth, 3, 1, 1) for i in range(5)]
-        )
+        self.conv1 = nn.Conv2d(channels, growth, 3, 1, 1, bias=bias)
+        self.conv2 = nn.Conv2d(channels + growth, growth, 3, 1, 1, bias=bias)
+        self.conv3 = nn.Conv2d(channels + 2 * growth, growth, 3, 1, 1, bias=bias)
+        self.conv4 = nn.Conv2d(channels + 3 * growth, growth, 3, 1, 1, bias=bias)
+        self.conv5 = nn.Conv2d(channels + 4 * growth, channels, 3, 1, 1, bias=bias)
+
         self.lrelu = nn.LeakyReLU(0.2, inplace=True)
 
         # initialisation
-        initialise_weights(self.layers, 0.1)
+        initialise_weights([self.conv1, self.conv2, self.conv3, self.conv4, self.conv5], 0.1)
 
     def forward(self, x):
         f1 = self.lrelu(self.layers[0](x))
