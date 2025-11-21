@@ -74,7 +74,7 @@ class RRDB(nn.Module):
 class Generator(nn.Module):
     def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=23, gc=32, scale=4):
         super().__init__()
-        RRDB_block_f = functools.partial(RRDB, nf=num_feat, gc=gc)
+        RRDB_block_f = functools.partial(RRDB, channels=num_feat, growth=gc)
         self.scale = scale
 
         # First layer
