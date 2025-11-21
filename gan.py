@@ -47,11 +47,11 @@ class DenseBlock(nn.Module):
         initialise_weights([self.conv1, self.conv2, self.conv3, self.conv4, self.conv5], 0.1)
 
     def forward(self, x):
-        f1 = self.lrelu(self.layers[0](x))
-        f2 = self.lrelu(self.layers[1](torch.cat((x, f1), 1)))
-        f3 = self.lrelu(self.layers[2](torch.cat((x, f1, f2), 1)))
-        f4 = self.lrelu(self.layers[3](torch.cat((x, f1, f2, f3), 1)))
-        f5 = self.layers[4](torch.cat((x, f1, f2, f3, f4), 1))
+        f1 = self.lrelu(self.conv1(x))
+        f2 = self.lrelu(self.conv2(torch.cat((x, f1), 1)))
+        f3 = self.lrelu(self.conv3(torch.cat((x, f1, f2), 1)))
+        f4 = self.lrelu(self.conv4(torch.cat((x, f1, f2, f3), 1)))
+        f5 = self.conv5(torch.cat((x, f1, f2, f3, f4), 1))
 
         return f5 * 0.2 + x
 
