@@ -88,7 +88,7 @@ class Generator(nn.Module):
         self.upconv1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
         if self.scale==4:
             self.upconv2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
-        self.HRconv_last = nn.Conv2d(num_feat, out_ch, 3, 1, 1, bias=True)
+        self.HRconv = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
 
         # Final conv
         self.conv_last = nn.Conv2d(num_feat, out_ch, 3, 1, 1, bias=True)
