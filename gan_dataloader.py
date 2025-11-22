@@ -170,6 +170,10 @@ class DIV2KDataLoader(Dataset):
         if self.mode == 'train':
             img_lr, img_hr = self._generate_random_crop(img_lr, img_hr)
 
+        # Upscale LR to match HR size
+        if self.mode in ['val', 'test']:
+            img_lr = img_lr.resize(img_hr.size, Image.BICUBIC)
+
         if self.transform:
             img_lr = self.transform(img_lr)
             img_hr = self.transform(img_hr)
