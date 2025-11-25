@@ -2,6 +2,8 @@
 .DS_Store
 # Dataset
 DIV2K/
+generated_image/
+training_checkpoints/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

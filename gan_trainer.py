@@ -109,56 +109,97 @@ def training(lr_img, hr_img):
 
     return loss_D, loss_G
 
+# def visualise_generated_images(generator, epoch, image_dir, num_samples=1):
+#     generator.eval()
+
+#     for i in range(num_samples):
+#         # Pick a sample
+#         lr_img, hr_img = train_dataset[i]
+#         lr_img = lr_img.unsqueeze(0).to(device)
+#         hr_img = hr_img.to(device)
+
+#         # # --- Resize HR and LR to match SR size for visualization ---
+#         lr_resized = F.interpolate(lr_img, scale_factor=8 , mode="nearest")
+#         lr_resized = lr_resized.squeeze(0)
+
+
+#         # # --- Make comparison grid ---
+#         with torch.no_grad():
+#             sr_img = generator(lr_img).squeeze(0)   # [3,H,W], values likely [-1,1]
+
+#         # # Map to 0-1
+#         # sr_img_vis = (sr_img + 1) / 2
+#         # sr_img_vis = sr_img_vis.clamp(0,1)
+
+#         # # Also make LR/HR consistent
+#         # lr_resized_vis = lr_resized.clamp(0,1)
+#         # hr_img_vis = hr_img.squeeze(0).clamp(0,1)
+
+#         # # Stack for grid
+#         # comparison = torch.stack([lr_resized_vis, sr_img_vis, hr_img_vis], dim=0)
+
+#         # grid = torchvision.utils.make_grid(comparison, nrow=3, value_range=(0,1))
+#         # grid_np = grid.permute(1,2,0).cpu().numpy()
+#         # grid_uint8 = (grid_np * 255).astype(np.uint8)
+
+
+#         # # --- Save ---
+#         # filename = f"{image_dir}/epoch_{epoch}_sample_{i}.png"
+#         # Image.fromarray(grid_uint8).save(filename)
+#         comparison = torch.stack([lr_resized, sr_img, hr_img], dim=0)
+
+#         filename = f"{image_dir}/epoch_{epoch}_sample_{i}.png"
+        
+#         # Use torchvision's specialized function. 
+#         # It handles clamping (0-1), numpy conversion, and saving correctly.
+#         # Normalize=False means we trust the values are already in the display range (0-1).
+#         torchvision.utils.save_image(
+#             comparison, 
+#             filename, 
+#             nrow=3, 
+#             normalize=False, 
+#             value_range=(0, 1) # Ensure the output is mapped correctly to 0-255
+#         )
+
+#     generator.train()
 def visualise_generated_images(generator, epoch, image_dir, num_samples=1):
     generator.eval()
 
     for i in range(num_samples):
-        # Pick a sample
         lr_img, hr_img = train_dataset[i]
         lr_img = lr_img.unsqueeze(0).to(device)
         hr_img = hr_img.to(device)
 
-        # # --- Resize HR and LR to match SR size for visualization ---
+        with torch.no_grad():
+            sr_img = generator(lr_img).squeeze(0)  
+
+        # --- FIX: Apply Safe Clamping/Normalization for Visualization ---
         lr_resized = F.interpolate(lr_img, scale_factor=8 , mode="nearest")
         lr_resized = lr_resized.squeeze(0)
+        
+        # 1. Clamp the SR image to the visible range [0, 1].
+        #    This is crucial because the generator output is unbounded.
+        sr_vis = sr_img.clamp(0, 1)
+
+        # 2. Ensure LR and HR are also ready for stacking (squeeze out batch dim if necessary)
+        lr_vis = lr_resized.clamp(0, 1) # Already squeezed in your code
+        hr_vis = hr_img.squeeze(0).clamp(0, 1)
 
 
-        # # --- Make comparison grid ---
-        with torch.no_grad():
-            sr_img = generator(lr_img).squeeze(0)   # [3,H,W], values likely [-1,1]
-
-        # # Map to 0-1
-        # sr_img_vis = (sr_img + 1) / 2
-        # sr_img_vis = sr_img_vis.clamp(0,1)
-
-        # # Also make LR/HR consistent
-        # lr_resized_vis = lr_resized.clamp(0,1)
-        # hr_img_vis = hr_img.squeeze(0).clamp(0,1)
-
-        # # Stack for grid
-        # comparison = torch.stack([lr_resized_vis, sr_img_vis, hr_img_vis], dim=0)
-
-        # grid = torchvision.utils.make_grid(comparison, nrow=3, value_range=(0,1))
-        # grid_np = grid.permute(1,2,0).cpu().numpy()
-        # grid_uint8 = (grid_np * 255).astype(np.uint8)
-
-
-        # # --- Save ---
-        # filename = f"{image_dir}/epoch_{epoch}_sample_{i}.png"
-        # Image.fromarray(grid_uint8).save(filename)
-        comparison = torch.stack([lr_resized, sr_img, hr_img], dim=0)
+        # --- Make comparison grid ---
+        # Stack the three visualization-ready tensors
+        comparison = torch.stack([lr_vis, sr_vis, hr_vis], dim=0)
 
         filename = f"{image_dir}/epoch_{epoch}_sample_{i}.png"
         
         # Use torchvision's specialized function. 
-        # It handles clamping (0-1), numpy conversion, and saving correctly.
-        # Normalize=False means we trust the values are already in the display range (0-1).
+        # Ensure normalize=False and rely on the tensors being pre-clamped.
         torchvision.utils.save_image(
             comparison, 
             filename, 
             nrow=3, 
             normalize=False, 
-            value_range=(0, 1) # Ensure the output is mapped correctly to 0-255
+            value_range=(0, 1)
         )
 
     generator.train()
