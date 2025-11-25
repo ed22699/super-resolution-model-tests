@@ -77,7 +77,7 @@ class RRDB(nn.Module):
 # BSRGAN / ESRGAN Generator RRDBNet
 # -----------------------
 class Generator(nn.Module):
-    def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=23, gc=32, scale=4):
+    def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=23, gc=32, scale=8):
         super().__init__()
         RRDB_block_f = functools.partial(RRDB, channels=num_feat, growth=gc)
         self.scale = scale
@@ -91,8 +91,12 @@ class Generator(nn.Module):
 
         # Upsampling modules
         self.upconv1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
-        if self.scale==4:
+        if self.scale>=4:
             self.upconv2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
+
+        if self.scale == 8:
+            self.upconv3 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
+
         self.HRconv = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
 
         # Final conv
@@ -106,80 +110,17 @@ class Generator(nn.Module):
         fea = fea + trunk
         
         fea = self.lrelu(self.upconv1(F.interpolate(fea, scale_factor=2, mode='nearest')))
-        if self.scale==4:
+        if self.scale>=4:
             fea = self.lrelu(self.upconv2(F.interpolate(fea, scale_factor=2, mode='nearest')))
+
+        if self.scale == 8:
+            fea = self.lrelu(self.upconv3(F.interpolate(fea, scale_factor=2, mode='nearest')))
+
 
         out = self.conv_last(self.lrelu(self.HRconv(fea)))
 
         return out
 
-
-# class Generator(nn.Module):
-#     def __init__(self, input_dim):
-#         super(Generator, self).__init__()
-#         self.fc1 = nn.Linear(input_dim, 32 * 32)
-#         self.br1 = nn.Sequential(
-#             nn.BatchNorm1d(1024),
-#             nn.ReLU()
-#         )
-#         self.fc2 = nn.Linear(32 * 32, 128 * 7 * 7)
-#         self.br2 = nn.Sequential(
-#             nn.BatchNorm1d(128 * 7 * 7),
-#             nn.ReLU()
-#         )
-#         self.conv1 = nn.Sequential(
-#             nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
-#             nn.BatchNorm2d(64),
-#             nn.ReLU(),
-#         )
-#         self.conv2 = nn.Sequential(
-#             nn.ConvTranspose2d(64, 1, 4, stride=2, padding=1),  # Final upsampling to 28x28x1
-#             nn.Sigmoid()
-#         )
-#
-#     def forward(self, x):
-#         x = self.br1(self.fc1(x))
-#         x = self.br2(self.fc2(x))
-#         # Reshape the tensor for the convolutional layers
-#         x = x.reshape(-1, 128, 7, 7)
-#         x = self.conv1(x)
-#         output = self.conv2(x)
-#         return output
-
-
-# class Discriminator(nn.Module):
-#     def __init__(self):
-#         super(Discriminator, self).__init__()
-#         self.conv1 = nn.Sequential(
-#             nn.Conv2d(1, 32, 5, stride=1),
-#             nn.LeakyReLU(0.2)
-#         )
-#         self.pl1 = nn.MaxPool2d(2, stride=2)
-#         self.conv2 = nn.Sequential(
-#             nn.Conv2d(32, 64, 5, stride=1),
-#             nn.LeakyReLU(0.2)
-#         )
-#         self.pl2 = nn.MaxPool2d(2, stride=2)
-#         self.fc1 = nn.Sequential(
-#             nn.Linear(64 * 4 * 4, 1024),
-#             nn.LeakyReLU(0.2)
-#         )
-#         # Output layer: input size = 1024, output size = 1 (probability of being real or fake)
-#         self.fc2 = nn.Sequential(
-#             nn.Linear(1024, 1),
-#             nn.Sigmoid()
-#         )
-#
-#     def forward(self, x):
-#         x = self.conv1(x)
-#         x = self.pl1(x)
-#         x = self.conv2(x)
-#         x = self.pl2(x)
-#         # Flatten the feature maps into a 1D vector for the fully connected layers
-#         x = x.view(x.shape[0], -1)
-#         x = self.fc1(x)
-#         output = self.fc2(x)
-#         return output
 
 class Discriminator(nn.Module):
     def __init__(self, in_ch=3):
@@ -207,7 +148,7 @@ class Discriminator(nn.Module):
         )
 
         self.classifier = nn.Sequential(
-            nn.Linear(512 * 16 * 16, 100),
+            nn.Linear(512 * 32 * 32, 100),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Linear(100, 1)
         )

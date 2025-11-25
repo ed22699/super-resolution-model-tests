@@ -6,7 +6,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 
 
-class DIV2KDataLoader(Dataset):
+class GANDIV2KDataLoader(Dataset):
     """
     A PyTorch `Dataset` class for DIV2K related challenges
 
@@ -64,10 +64,10 @@ class DIV2KDataLoader(Dataset):
         self.patch_size = patch_size
 
         # Iterate through recipe folders and collect ordered step images
-        self.lr_image_files = [f for f in os.listdir(
-            root_dir_lr) if f.lower().endswith('.png')]
-        self.hr_image_files = [f for f in os.listdir(
-            root_dir_hr) if f.lower().endswith('.png')]
+        self.lr_image_files = sorted([f for f in os.listdir(
+            root_dir_lr) if f.lower().endswith('.png')])
+        self.hr_image_files = sorted([f for f in os.listdir(
+            root_dir_hr) if f.lower().endswith('.png')])
 
         self.lr_image_files.sort()
         self.hr_image_files.sort()
@@ -157,11 +157,7 @@ class DIV2KDataLoader(Dataset):
                 raise ValueError(
                     "In 'val'/'test' mode, 'idx' must be provided.")
             img_lr_path = self.lr_image_files[idx]
-            code = img_lr_path[:4]
-            for item in self.hr_image_files:
-                if item[:4] == code:
-                    img_hr_path = item
-                    break
+            img_hr_path = self.hr_image_files[idx]
 
         img_lr = Image.open(self.root_dir_lr + "/" + img_lr_path).convert("RGB")
         img_hr = Image.open(self.root_dir_hr + "/" + img_hr_path).convert("RGB")
@@ -171,7 +167,7 @@ class DIV2KDataLoader(Dataset):
             img_lr, img_hr = self._generate_random_crop(img_lr, img_hr)
 
         # Upscale LR to match HR size
-        if self.mode in ['val', 'test']:
+        else:
             img_lr = img_lr.resize(img_hr.size, Image.BICUBIC)
 
         if self.transform:
