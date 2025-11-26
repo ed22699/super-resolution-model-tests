@@ -1,7 +1,7 @@
 import os
 import torch
 
-def save_checkpoint(epoch, generator, discriminator, generator_optimizer, discriminator_optimizer, checkpoint_dir):
+def save_checkpoint(epoch, psnr, generator, discriminator, generator_optimizer, discriminator_optimizer, checkpoint_dir):
     # Save the model and optimizer states
     checkpoint = {
         'epoch': epoch,
@@ -11,5 +11,5 @@ def save_checkpoint(epoch, generator, discriminator, generator_optimizer, discri
         'discriminator_optimizer_state_dict': discriminator_optimizer.state_dict()
     }
     # Save the checkpoint
-    torch.save(checkpoint, os.path.join(checkpoint_dir, f'ckpt_epoch_{epoch:04d}.pth'))
+    torch.save(checkpoint, os.path.join(checkpoint_dir, f'ckpt_PSNR_{psnr:.4f}.pth'))
     print(f'Checkpoint saved for epoch {epoch}')

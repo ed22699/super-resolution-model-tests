@@ -102,6 +102,10 @@ class Generator(nn.Module):
         # Final conv
         self.conv_last = nn.Conv2d(num_feat, out_ch, 3, 1, 1, bias=True)
 
+        # Initialization for stability and color neutrality
+        nn.init.normal_(self.conv_last.weight, mean=0, std=0.001)
+        nn.init.constant_(self.conv_last.bias, 0.5)
+
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
     def forward(self, x):
