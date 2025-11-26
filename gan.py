@@ -77,7 +77,7 @@ class RRDB(nn.Module):
 # BSRGAN / ESRGAN Generator RRDBNet
 # -----------------------
 class Generator(nn.Module):
-    def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=23, gc=32, scale=8):
+    def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=8, gc=32, scale=8):
         super().__init__()
         RRDB_block_f = functools.partial(RRDB, channels=num_feat, growth=gc)
         self.scale = scale
@@ -97,12 +97,19 @@ class Generator(nn.Module):
         if self.scale == 8:
             self.upconv3 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
 
+        # Initialize the upsampling layers
+        if hasattr(self, 'upconv2'):
+            initialise_weights(self.upconv2, 1.0)
+        if hasattr(self, 'upconv3'):
+            initialise_weights(self.upconv3, 1.0)
+
         self.HRconv = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
+
+        initialise_weights([self.conv_first, self.trunk_conv, self.HRconv, self.upconv1], 1.0) 
 
         # Final conv
         self.conv_last = nn.Conv2d(num_feat, out_ch, 3, 1, 1, bias=True)
 
-        # Initialization for stability and color neutrality
         nn.init.normal_(self.conv_last.weight, mean=0, std=0.001)
         nn.init.constant_(self.conv_last.bias, 0.5)
 

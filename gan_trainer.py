@@ -18,6 +18,9 @@ from gan import Generator, Discriminator
 from utils.save_checkpoint import save_checkpoint
 import torchvision.transforms.functional as TF
 
+# Alert messages
+import alert
+
 
 def main():
     # For GPU (CUDA) or CPU
@@ -56,14 +59,14 @@ def main():
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
-        batch_size=4,
+        batch_size=8,
         pin_memory=True,
         num_workers=cpu_count(),
     )
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
         shuffle=False,
-        batch_size=4,
+        batch_size=1,
         num_workers=cpu_count(),
         pin_memory=True,
     )
@@ -71,7 +74,7 @@ def main():
     # Define the Binary Cross Entropy loss function
     loss_func = nn.BCEWithLogitsLoss()
     input_dim = 3
-    num_epoch = 50
+    num_epoch = 500
 
     gan_G = Generator(input_dim).to(device)
     gan_D = Discriminator().to(device)
@@ -82,11 +85,13 @@ def main():
     optim_D = optim.Adam(gan_D.parameters(), lr=lr)
 
     # learning rate scheduler
-    scheduler_G = torch.optim.lr_scheduler.StepLR(optim_G, step_size=5, gamma=0.5)
-    scheduler_D = torch.optim.lr_scheduler.StepLR(optim_D, step_size=5, gamma=0.5)
+    scheduler_G = torch.optim.lr_scheduler.StepLR(optim_G, step_size=10, gamma=0.5)
+    scheduler_D = torch.optim.lr_scheduler.StepLR(optim_D, step_size=10, gamma=0.5)
 
     trainer = Trainer(loss_func, gan_G, gan_D, train_loader, val_loader, optim_G, optim_D, scheduler_D, scheduler_G, device)
     trainer.loopEpochs(num_epoch)
+
+    alert.send_notification(f"Training finished for visual AI")
 
         
 
@@ -195,18 +200,20 @@ class Trainer:
         self.gan_G.eval()
 
         for i in range(num_samples):
+            lr_tensor, hr_tensor = self.train_loader.dataset[i]
             # Pick a sample
-            lr_img, hr_img = self.train_dataset[i]
-            lr_img = lr_img.unsqueeze(0).to(self.device)
-            hr_img = hr_img.to(self.device)
+
+            lr_img = lr_tensor.unsqueeze(0).to(self.device)
+            hr_img = hr_tensor.to(self.device)
 
             # Resize HR and LR to match SR size for visualization
             lr_resized = F.interpolate(lr_img, scale_factor=8 , mode="nearest")
-            lr_resized = lr_resized.squeeze(0)
 
             # Make comparison grid
             with torch.no_grad():
                 sr_img = self.gan_G(lr_img).squeeze(0)
+
+            lr_img = lr_resized.squeeze(0)
 
             # Map to 0-1
             sr_min = sr_img.min()
@@ -215,8 +222,8 @@ class Trainer:
             sr_img_vis = sr_vis.clamp(0,1)
 
             # Also make LR/HR consistent
-            lr_resized_vis = lr_resized.clamp(0,1)
-            hr_img_vis = hr_img.squeeze(0).clamp(0,1)
+            lr_resized_vis = lr_img.clamp(0,1)
+            hr_img_vis = hr_img.clamp(0,1)
 
             # Stack for grid
             comparison = torch.stack([lr_resized_vis, sr_img_vis, hr_img_vis], dim=0)
@@ -233,7 +240,8 @@ class Trainer:
             self.best_psnr = psnr_sr
             filename = f"{self.image_dir}/top_image.png"
             Image.fromarray(grid_uint8).save(filename)
-            save_checkpoint(epoch, psnr, self.gan_G, self.gan_D, self.optim_G, self.optim_D, self.checkpoint_dir)
+            save_checkpoint(epoch, psnr_sr, self.gan_G, self.gan_D, self.optim_G, self.optim_D, self.checkpoint_dir)
+            alert.send_notification(f"New best PSNR: Epoch {epoch + 1}  PSNR: {psnr_sr:.2f}")
 
         # Print MSE and PSNR values
         print(f'MSE and PSNR for SR image: MSE = {mse_sr}, PSNR = {psnr_sr}')
