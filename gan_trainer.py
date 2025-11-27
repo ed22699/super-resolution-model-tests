@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import time
 from PIL import Image
 from gan_dataloader import GANDIV2KDataLoader
-from gan import Generator, Discriminator
+from gan import Generator, Discriminator, VGGFeatureExtractor
 from utils.save_checkpoint import save_checkpoint
 import torchvision.transforms.functional as TF
 
@@ -40,7 +40,7 @@ def main():
         root_dir_hr=hr_path,
         transform=basic_transforms,
         mode="train",
-        batch_size=256,
+        batch_size=128,
         scale=8
     )
 
@@ -52,7 +52,7 @@ def main():
         root_dir_hr=hr_path,
         transform=basic_transforms,
         mode="val",
-        batch_size=256,
+        batch_size=128,
         scale=8
     )
 
@@ -80,9 +80,8 @@ def main():
     gan_D = Discriminator().to(device)
 
     # define separate Adam optimizers
-    lr = 0.0001
-    optim_G = optim.Adam(gan_G.parameters(), lr=lr)
-    optim_D = optim.Adam(gan_D.parameters(), lr=lr)
+    optim_G = optim.Adam(gan_G.parameters(), lr=0.0001)
+    optim_D = optim.Adam(gan_D.parameters(), lr=0.00002)
 
     # learning rate scheduler
     scheduler_G = torch.optim.lr_scheduler.StepLR(optim_G, step_size=10, gamma=0.5)
@@ -108,14 +107,21 @@ class Trainer:
         self.scheduler_G = scheduler_G
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.iteration_losses_D = []
-        self.iteration_losses_G = []
-        self.epoch_losses_D = []
-        self.epoch_losses_G = []
+
+        # Directories
         self.checkpoint_dir = 'super-resolution-model-tests/training_checkpoints'
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.image_dir = 'super-resolution-model-tests/generated_image/'
         os.makedirs(self.image_dir, exist_ok=True)
+
+        # Loss
+        self.iteration_losses_D = []
+        self.iteration_losses_G = []
+        self.epoch_losses_D = []
+        self.epoch_losses_G = []
+        self.vgg_extractor = VGGFeatureExtractor().to(self.device)
+        self.lambda_vgg = 0.05
+        self.l1_loss = nn.L1Loss()
 
     def compute_mse(self, img1, img2):
         return F.mse_loss(img1, img2)
@@ -126,20 +132,40 @@ class Trainer:
 
     def discriminator_loss(self, real_output, fake_output):
         # Loss for real images
-        real_loss = self.loss_func(real_output, torch.ones_like(real_output).to(self.device))
+        real_loss = self.loss_func(real_output, torch.full_like(real_output, 0.9).to(self.device))
         # Loss for fake images
-        fake_loss = self.loss_func(fake_output, torch.zeros_like(fake_output).to(self.device))
+        fake_loss = self.loss_func(fake_output, torch.full_like(fake_output, 0.1).to(self.device))
 
         loss_D = real_loss + fake_loss
         return loss_D
 
-    def generator_loss(self, fake_output):
-        # Compare discriminator's output on fake images with target labels of 1
-        loss_G = self.loss_func(fake_output, torch.ones_like(fake_output).to(self.device))
+    def generator_loss(self, fake_output, fake_x, hr_img):
+        # L_Adversarial
+        loss_adv = self.loss_func(fake_output, torch.full_like(fake_output, 0.9).to(self.device))
+        
+        # L_Pixel, fake_x is the SR image, hr_img is the ground truth
+        loss_pixel = self.l1_loss(fake_x, hr_img)
+        
+        # L_Perceptual
+        VGG_SCALE_FACTOR = 0.5
+        fake_x_vgg = F.interpolate(fake_x, scale_factor=VGG_SCALE_FACTOR, mode='bilinear', align_corners=False)
+        hr_img_vgg = F.interpolate(hr_img, scale_factor=VGG_SCALE_FACTOR, mode='bilinear', align_corners=False)
+        vgg_fake = self.vgg_extractor(fake_x_vgg)
+        vgg_real = self.vgg_extractor(hr_img_vgg).detach()
+        
+        # L1 Loss on the feature maps
+        loss_perceptual = self.l1_loss(vgg_fake, vgg_real)
+        
+        # Combined Generator Loss
+        lambda_pixel = 0.5
+        
+        loss_G = loss_adv + (self.lambda_vgg * loss_perceptual) + (lambda_pixel * loss_pixel)
         return loss_G
 
     def loopEpochs(self, num_epoch):
         for epoch in range(num_epoch):
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
             start_time = time.time()
             total_loss_D, total_loss_G = 0, 0
 
@@ -187,7 +213,7 @@ class Trainer:
         # Training step for the Generator
         fake_x = self.gan_G(lr_img.to(self.device))
         fake_output = self.gan_D(fake_x)
-        loss_G = self.generator_loss(fake_output)
+        loss_G = self.generator_loss(fake_output, fake_x, hr_img.to(self.device))
 
         # Backpropagate the generator loss and update its parameters
         self.optim_G.zero_grad()
@@ -240,7 +266,7 @@ class Trainer:
             self.best_psnr = psnr_sr
             filename = f"{self.image_dir}/top_image.png"
             Image.fromarray(grid_uint8).save(filename)
-            save_checkpoint(epoch, psnr_sr, self.gan_G, self.gan_D, self.optim_G, self.optim_D, self.checkpoint_dir)
+            save_checkpoint(epoch, psnr_sr, self.gan_G, self.gan_D, self.checkpoint_dir)
             alert.send_notification(f"New best PSNR: Epoch {epoch + 1}  PSNR: {psnr_sr:.2f}")
 
         # Print MSE and PSNR values

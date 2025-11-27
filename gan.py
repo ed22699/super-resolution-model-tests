@@ -3,6 +3,28 @@ from torch import nn
 import functools
 import torch.nn.functional as F
 import torch.nn.init as init
+from torchvision.models.vgg import vgg19
+
+class VGGFeatureExtractor(nn.Module):
+    def __init__(self, feature_layer=36, requires_grad=False):
+        super().__init__()
+        
+        # Load pre-trained VGG-19
+        vgg_pretrained_features = vgg19(weights='VGG19_Weights.IMAGENET1K_V1').features
+        
+        # stop at layer 36
+        self.slice = nn.Sequential()
+        for x in range(feature_layer + 1):
+            self.slice.add_module(str(x), vgg_pretrained_features[x])
+
+        # Freeze the weights
+        if not requires_grad:
+            for param in self.slice.parameters():
+                param.requires_grad = False
+
+    def forward(self, x):
+        return self.slice(x)
+
 
 def initialise_weights(net_l, scale=1):
     if not isinstance(net_l, list):
@@ -110,8 +132,9 @@ class Generator(nn.Module):
         # Final conv
         self.conv_last = nn.Conv2d(num_feat, out_ch, 3, 1, 1, bias=True)
 
-        nn.init.normal_(self.conv_last.weight, mean=0, std=0.001)
-        nn.init.constant_(self.conv_last.bias, 0.5)
+        # nn.init.normal_(self.conv_last.weight, mean=0, std=0.001)
+        # nn.init.constant_(self.conv_last.bias, 0.5)
+        initialise_weights(self.conv_last, 1.0) 
 
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
