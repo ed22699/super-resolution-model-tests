@@ -17,6 +17,7 @@ from gan_dataloader import GANDIV2KDataLoader
 from gan import Generator, Discriminator, VGGFeatureExtractor
 from utils.save_checkpoint import save_checkpoint
 import torchvision.transforms.functional as TF
+import random
 
 # Alert messages
 import alert
@@ -40,7 +41,7 @@ def main():
         root_dir_hr=hr_path,
         transform=basic_transforms,
         mode="train",
-        batch_size=128,
+        batch_size=64,
         scale=8
     )
 
@@ -52,14 +53,15 @@ def main():
         root_dir_hr=hr_path,
         transform=basic_transforms,
         mode="val",
-        batch_size=128,
-        scale=8
+        batch_size=64,
+        scale=8,
+        patch_size=128,
     )
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
-        batch_size=8,
+        batch_size=4,
         pin_memory=True,
         num_workers=cpu_count(),
     )
@@ -80,7 +82,9 @@ def main():
     gan_D = Discriminator().to(device)
 
     # define separate Adam optimizers
-    optim_G = optim.Adam(gan_G.parameters(), lr=0.0001)
+    # do 0.0002 (1.64), 0.00015 (1.79), 0.00025 (1.31), 0.0003 (1.16), 0.00035 for G
+    optim_G = optim.Adam(gan_G.parameters(), lr=0.00035) 
+    # was 0.00002
     optim_D = optim.Adam(gan_D.parameters(), lr=0.00002)
 
     # learning rate scheduler
@@ -120,7 +124,7 @@ class Trainer:
         self.epoch_losses_D = []
         self.epoch_losses_G = []
         self.vgg_extractor = VGGFeatureExtractor().to(self.device)
-        self.lambda_vgg = 0.05
+        self.lambda_vgg = 0.2
         self.l1_loss = nn.L1Loss()
 
     def compute_mse(self, img1, img2):
@@ -132,16 +136,16 @@ class Trainer:
 
     def discriminator_loss(self, real_output, fake_output):
         # Loss for real images
-        real_loss = self.loss_func(real_output, torch.full_like(real_output, 0.9).to(self.device))
+        real_loss = self.loss_func(real_output, torch.full_like(real_output, 0.8).to(self.device))
         # Loss for fake images
-        fake_loss = self.loss_func(fake_output, torch.full_like(fake_output, 0.1).to(self.device))
+        fake_loss = self.loss_func(fake_output, torch.full_like(fake_output, 0.2).to(self.device))
 
         loss_D = real_loss + fake_loss
         return loss_D
 
     def generator_loss(self, fake_output, fake_x, hr_img):
         # L_Adversarial
-        loss_adv = self.loss_func(fake_output, torch.full_like(fake_output, 0.9).to(self.device))
+        loss_adv = self.loss_func(fake_output, torch.full_like(fake_output, 0.8).to(self.device))
         
         # L_Pixel, fake_x is the SR image, hr_img is the ground truth
         loss_pixel = self.l1_loss(fake_x, hr_img)
@@ -191,7 +195,8 @@ class Trainer:
 
             # Task1: visualise the generated image at different epochs
             if (epoch + 1) % 5 == 0:
-                self.visualise_generated_images(epoch)
+                # self.visualise_generated_images(epoch)
+                self.visualise_validation_set(epoch)
 
         # Task2: visualise the loss through a plot
         self.visualise_loss(self.iteration_losses_D, self.iteration_losses_G, self.image_dir, 'Iteration')
@@ -222,57 +227,113 @@ class Trainer:
 
         return loss_D, loss_G
 
-    def visualise_generated_images(self, epoch, num_samples=1):
+    def visualise_validation_set(self, epoch):
         self.gan_G.eval()
+        total_psnr = 0
+        count = 0
+        imageChosenNum = random.randint(0,  self.val_loader.dataset.__len__() - 1)
+        imageChosen = None
 
-        for i in range(num_samples):
-            lr_tensor, hr_tensor = self.train_loader.dataset[i]
-            # Pick a sample
+        with torch.no_grad():
+            # Iterate over the full validation set
+            for lr_img, hr_img in self.val_loader:
+                lr_img = lr_img.to(self.device)
+                hr_img = hr_img.to(self.device)
 
-            lr_img = lr_tensor.unsqueeze(0).to(self.device)
-            hr_img = hr_tensor.to(self.device)
+                sr_img = self.gan_G(lr_img)
 
-            # Resize HR and LR to match SR size for visualization
-            lr_resized = F.interpolate(lr_img, scale_factor=8 , mode="nearest")
+                lr_img = F.interpolate(lr_img, scale_factor=8 , mode="nearest")
 
-            # Make comparison grid
-            with torch.no_grad():
-                sr_img = self.gan_G(lr_img).squeeze(0)
+                sr_img_vis = sr_img.squeeze(0).clamp(0, 1)
+                lr_img_vis = lr_img.squeeze(0).clamp(0, 1)
+                hr_img_vis = hr_img.squeeze(0).clamp(0, 1)
 
-            lr_img = lr_resized.squeeze(0)
+                # Calculate PSNR
+                mse_sr = self.compute_mse(hr_img_vis, sr_img_vis).item()
+                psnr_sr = self.compute_psnr(mse_sr).item()
+                total_psnr += psnr_sr
 
-            # Map to 0-1
-            sr_min = sr_img.min()
-            sr_max = sr_img.max()
-            sr_vis = (sr_img - sr_min) / (sr_max - sr_min + 1e-5)
-            sr_img_vis = sr_vis.clamp(0,1)
+                comparison = torch.stack([lr_img_vis, sr_img_vis, hr_img_vis], dim=0)
+            
+                if count == imageChosenNum:
+                    imageChosen = comparison.cpu()
 
-            # Also make LR/HR consistent
-            lr_resized_vis = lr_img.clamp(0,1)
-            hr_img_vis = hr_img.clamp(0,1)
+                count += 1
 
-            # Stack for grid
-            comparison = torch.stack([lr_resized_vis, sr_img_vis, hr_img_vis], dim=0)
+        # Calculate average PSNR
+        avg_psnr = total_psnr / count if count > 0 else 0
 
-            grid = torchvision.utils.make_grid(comparison, nrow=3, value_range=(0,1))
-            grid_np = grid.permute(1,2,0).cpu().numpy()
-            grid_uint8 = (grid_np * 255).astype(np.uint8)
+        # Grid
+        grid = torchvision.utils.make_grid(imageChosen, nrow=3, value_range=(0,1))
 
+        grid_np = grid.permute(1,2,0).numpy()
+        grid_uint8 = (grid_np * 255).astype(np.uint8)
 
-        mse_sr = self.compute_mse(hr_img_vis, sr_img_vis).item()
-        psnr_sr = self.compute_psnr(mse_sr)
-        # --- Save ---
-        if self.best_psnr < psnr_sr:
-            self.best_psnr = psnr_sr
+        # Use AVG PSNR for checkpoint save
+        if self.best_psnr < avg_psnr:
+            self.best_psnr = avg_psnr
+            save_checkpoint(epoch, avg_psnr, self.gan_G, self.gan_D, self.checkpoint_dir)
+            alert.send_notification(f"New best AVG PSNR: Epoch {epoch + 1}  PSNR: {avg_psnr:.2f}")
             filename = f"{self.image_dir}/top_image.png"
-            Image.fromarray(grid_uint8).save(filename)
-            save_checkpoint(epoch, psnr_sr, self.gan_G, self.gan_D, self.checkpoint_dir)
-            alert.send_notification(f"New best PSNR: Epoch {epoch + 1}  PSNR: {psnr_sr:.2f}")
 
-        # Print MSE and PSNR values
-        print(f'MSE and PSNR for SR image: MSE = {mse_sr}, PSNR = {psnr_sr}')
+        Image.fromarray(grid_uint8).save(filename)
+
+        # Print AVG PSNR value
+        print(f'Validation AVG PSNR: {avg_psnr:.4f}')
 
         self.gan_G.train()
+
+    # def visualise_generated_images(self, epoch, num_samples=1):
+    #     self.gan_G.eval()
+
+    #     for i in range(num_samples):
+    #         lr_tensor, hr_tensor = self.val_loader.dataset[i]
+    #         # Pick a sample
+
+    #         lr_img = lr_tensor.unsqueeze(0).to(self.device)
+    #         hr_img = hr_tensor.to(self.device)
+
+    #         # Resize HR and LR to match SR size for visualization
+    #         lr_resized = F.interpolate(lr_img, scale_factor=8 , mode="nearest")
+
+    #         # Make comparison grid
+    #         with torch.no_grad():
+    #             sr_img = self.gan_G(lr_img).squeeze(0)
+
+    #         lr_img = lr_resized.squeeze(0)
+
+    #         # Map to 0-1
+    #         sr_min = sr_img.min()
+    #         sr_max = sr_img.max()
+    #         sr_vis = (sr_img - sr_min) / (sr_max - sr_min + 1e-5)
+    #         sr_img_vis = sr_vis.clamp(0,1)
+
+    #         # Also make LR/HR consistent
+    #         lr_resized_vis = lr_img.clamp(0,1)
+    #         hr_img_vis = hr_img.clamp(0,1)
+
+    #         # Stack for grid
+    #         comparison = torch.stack([lr_resized_vis, sr_img_vis, hr_img_vis], dim=0)
+
+    #         grid = torchvision.utils.make_grid(comparison, nrow=3, value_range=(0,1))
+    #         grid_np = grid.permute(1,2,0).cpu().numpy()
+    #         grid_uint8 = (grid_np * 255).astype(np.uint8)
+
+
+    #     mse_sr = self.compute_mse(hr_img_vis, sr_img_vis).item()
+    #     psnr_sr = self.compute_psnr(mse_sr)
+    #     # --- Save ---
+    #     if self.best_psnr < psnr_sr:
+    #         self.best_psnr = psnr_sr
+    #         save_checkpoint(epoch, psnr_sr, self.gan_G, self.gan_D, self.checkpoint_dir)
+    #         alert.send_notification(f"New best PSNR: Epoch {epoch + 1}  PSNR: {psnr_sr:.2f}")
+    #     filename = f"{self.image_dir}/top_image.png"
+    #     Image.fromarray(grid_uint8).save(filename)
+
+    #     # Print MSE and PSNR values
+    #     print(f'MSE and PSNR for SR image: MSE = {mse_sr}, PSNR = {psnr_sr}')
+
+    #     self.gan_G.train()
 
     def visualise_loss(self, losses_D, losses_G, image_dir, loss_type):
         plt.plot(losses_D, label="losses_D")

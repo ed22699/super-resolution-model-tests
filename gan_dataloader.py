@@ -75,6 +75,34 @@ class GANDIV2KDataLoader(Dataset):
         print(f"Found {len(self.lr_image_files)} images for {self.mode} task.")
         print(f"Found {len(self.hr_image_files)} images for {self.mode} task.")
 
+    def _generate_constant_crop(self, lr_img, hr_img):
+        """
+        crops the same for both the high resolution and low resolution image.
+
+        Returns
+        -------
+        tuple
+            (cropped_img_lr, cropped_img_hr)
+        """
+        # Select crop pos
+        w, h = lr_img.size
+        x = w / 2 - (self.patch_size / 2)
+        y = h / 2 - (self.patch_size / 2)
+
+        # crop lr img
+        lr_crop = lr_img.crop((x, y, x + self.patch_size, y + self.patch_size))
+
+        # Match crop for hr img
+        x_hr = x * self.scale
+        y_hr = y * self.scale
+        hr_crop = hr_img.crop((
+            x_hr,
+            y_hr,
+            x_hr + (self.patch_size * self.scale),
+            y_hr + (self.patch_size * self.scale),
+        ))
+        return lr_crop, hr_crop
+
     def _generate_random_crop(self, lr_img, hr_img):
         """
         Randomly selects a cropping position and crops the same for both the 
@@ -162,13 +190,10 @@ class GANDIV2KDataLoader(Dataset):
         img_lr = Image.open(self.root_dir_lr + "/" + img_lr_path).convert("RGB")
         img_hr = Image.open(self.root_dir_hr + "/" + img_hr_path).convert("RGB")
 
-        # Random cropping
-        if self.mode == 'train':
+        if self.mode == "train":
             img_lr, img_hr = self._generate_random_crop(img_lr, img_hr)
-
-        # Upscale LR to match HR size
         else:
-            img_lr = img_lr.resize(img_hr.size, Image.BICUBIC)
+            img_lr, img_hr = self._generate_constant_crop(img_lr, img_hr)
 
         if self.transform:
             img_lr = self.transform(img_lr)
