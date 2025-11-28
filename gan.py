@@ -156,143 +156,49 @@ class Generator(nn.Module):
 
         return out
 
-
 class Discriminator(nn.Module):
-    def __init__(self, num_in_ch=3, num_feat=64):
+    def __init__(self, in_channels=3, ndf=64, n_layers=5):
         super(Discriminator, self).__init__()
-        
-        # Helper to create spectral norm convolution
-        def sn_conv(in_channels, out_channels, kernel_size, stride, padding, bias=True):
-            k = 4 if stride == 2 else 3 
-            p = 1 if stride == 2 else 1
-            return spectral_norm(nn.Conv2d(in_channels, out_channels, k, stride, p, bias=bias))
 
-        # 1. Downsampling (Encoder - 3 levels + initial conv)
-        nf = num_feat # 64
-        
-        # Encoder convolutions
-        self.conv0 = sn_conv(num_in_ch, nf, 3, 1, 1)        # 3 -> 64
-        self.conv1 = sn_conv(nf, nf * 2, 4, 2, 1, bias=False)       # 64 -> 128 (H/2)
-        self.conv2 = sn_conv(nf * 2, nf * 4, 4, 2, 1, bias=False)   # 128 -> 256 (H/4)
-        self.conv3 = sn_conv(nf * 4, nf * 8, 4, 2, 1, bias=False)   # 256 -> 512 (H/8)
-        
-        # 2. Upsampling (Decoder - 3 levels)
-        # UPDATE THESE LINES TO MATCH CONCATENATION SIZES
-        
-        # conv4: (512 from x3_up) + (256 from x2) = 768 channels input
-        self.conv4 = sn_conv(nf * 8 + nf * 4, nf * 4, 3, 1, 1) # 768 -> 256
-        
-        # conv5: (256 from x4_up) + (128 from x1) = 384 channels input
-        self.conv5 = sn_conv(nf * 4 + nf * 2, nf * 2, 3, 1, 1) # 384 -> 128
-        
-        # conv6: (128 from x5_up) + (64 from x0) = 192 channels input
-        self.conv6 = sn_conv(nf * 2 + nf, nf, 3, 1, 1) # 192 -> 64
+        def vgg_sn_block(in_feat, out_feat, stride=2, use_sn=True):
+            conv = nn.Conv2d(in_feat, out_feat, kernel_size=3, stride=stride, padding=1, bias=True)
+            
+            # Apply Spectral Normalization
+            if use_sn:
+                layers = [spectral_norm(conv)]
+            else:
+                layers = [conv]
+                
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
+            return layers
 
-        # 3. Final Output
-        self.conv7 = sn_conv(nf, nf, 3, 1, 1)
-        self.conv_last = sn_conv(nf, 1, 3, 1, 1)
+        layers = []
+
+        layers.extend(vgg_sn_block(in_channels, ndf, stride=2, use_sn=True))
+
+        # Downsampling 
+        nf_mult = 1
+        nf_mult_prev = 1
         
-        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        for n in range(1, n_layers):
+            nf_mult_prev = nf_mult
+            nf_mult = min(2 ** n, 8)
+            
+            layers.extend(vgg_sn_block(ndf * nf_mult_prev, ndf * nf_mult, stride=2, use_sn=True))
+
+        # Refinement Layer
+        nf_mult_prev = nf_mult
+        nf_mult = min(2 ** n_layers, 8)
+        
+        # Conv with SN
+        conv_intermediate = nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=3, stride=1, padding=1, bias=True)
+        layers.append(spectral_norm(conv_intermediate))
+        layers.append(nn.LeakyReLU(0.2, inplace=True))
+
+        # Output Layer
+        layers.append(nn.Conv2d(ndf * nf_mult, 1, kernel_size=3, stride=1, padding=1))
+
+        self.model = nn.Sequential(*layers)
 
     def forward(self, x):
-        # -- Encoder --
-        x0 = self.lrelu(self.conv0(x)) # Skip 0 (64ch)
-        x1 = self.lrelu(self.conv1(x0)) # Skip 1 (128ch)
-        x2 = self.lrelu(self.conv2(x1)) # Skip 2 (256ch)
-        x3 = self.lrelu(self.conv3(x2)) # Deepest features (512ch)
-
-        # -- Decoder (with concatenation-based skip connections) --
-        # Up 1: Combine 512ch (upsampled x3) and 256ch (x2)
-        x3_up = F.interpolate(x3, scale_factor=2, mode='bilinear', align_corners=False)
-        # Concat: (N, 512+256, H/4, W/4)
-        x_concat_1 = torch.cat((x3_up, x2), dim=1) 
-        x4 = self.lrelu(self.conv4(x_concat_1)) # (N, 256, H/4, W/4)
-        
-        # Up 2: Combine 256ch (upsampled x4) and 128ch (x1)
-        x4_up = F.interpolate(x4, scale_factor=2, mode='bilinear', align_corners=False)
-        # Concat: (N, 256+128, H/2, W/2)
-        x_concat_2 = torch.cat((x4_up, x1), dim=1)
-        x5 = self.lrelu(self.conv5(x_concat_2)) # (N, 128, H/2, W/2)
-        
-        # Up 3: Combine 128ch (upsampled x5) and 64ch (x0)
-        x5_up = F.interpolate(x5, scale_factor=2, mode='bilinear', align_corners=False)
-        # Concat: (N, 128+64, H, W)
-        x_concat_3 = torch.cat((x5_up, x0), dim=1)
-        x6 = self.lrelu(self.conv6(x_concat_3)) # (N, 64, H, W)
-
-        # Final refinement and output map
-        out = self.lrelu(self.conv7(x6))
-        out = self.conv_last(out)
-        
-        return out
-
-# class Discriminator(nn.Module):
-#     """
-#     Defines a U-Net discriminator with Spectral Normalization (SN),
-#     deepened to handle 8x upscaled images (e.g., 512x512 input).
-#     """
-#     def __init__(self, num_in_ch=3, num_feat=64):
-#         super(Discriminator, self).__init__()
-        
-#         # Helper to create spectral norm convolution
-#         def sn_conv(in_channels, out_channels, kernel_size, stride, padding, bias=True):
-#             return spectral_norm(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=bias))
-
-#         # 1. Downsampling (Encoder - 5 levels for large input)
-#         # Input size: H x W
-#         self.conv0 = sn_conv(num_in_ch, num_feat, 3, 1, 1) # H x W -> H x W (64)
-        
-#         self.conv1 = sn_conv(num_feat, num_feat * 2, 4, 2, 1, bias=False)       # H/2 x W/2 (128)
-#         self.conv2 = sn_conv(num_feat * 2, num_feat * 4, 4, 2, 1, bias=False)   # H/4 x W/4 (256)
-#         self.conv3 = sn_conv(num_feat * 4, num_feat * 8, 4, 2, 1, bias=False)   # H/8 x W/8 (512)
-#         self.conv4 = sn_conv(num_feat * 8, num_feat * 8, 4, 2, 1, bias=False)   # H/16 x W/16 (512) # NEW
-#         self.conv5 = sn_conv(num_feat * 8, num_feat * 8, 4, 2, 1, bias=False)   # H/32 x W/32 (512) # NEW
-
-#         # 2. Upsampling (Decoder - 5 levels)
-#         self.conv6 = sn_conv(num_feat * 8, num_feat * 8, 3, 1, 1)
-#         self.conv7 = sn_conv(num_feat * 8, num_feat * 4, 3, 1, 1)
-#         self.conv8 = sn_conv(num_feat * 4, num_feat * 2, 3, 1, 1)
-#         self.conv9 = sn_conv(num_feat * 2, num_feat, 3, 1, 1)
-#         self.conv10 = sn_conv(num_feat, num_feat, 3, 1, 1)
-
-#         # 3. Final Output
-#         self.conv11 = sn_conv(num_feat, num_feat, 3, 1, 1)
-#         self.conv_last = sn_conv(num_feat, 1, 3, 1, 1)
-        
-#         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
-
-#     def forward(self, x):
-#         # -- Encoder --
-#         x0 = self.lrelu(self.conv0(x)) # Skip connection 0 (512)
-#         x1 = self.lrelu(self.conv1(x0)) # Skip connection 1 (256)
-#         x2 = self.lrelu(self.conv2(x1)) # Skip connection 2 (128)
-#         x3 = self.lrelu(self.conv3(x2)) # Skip connection 3 (64)
-#         x4 = self.lrelu(self.conv4(x3)) # Skip connection 4 (32)
-#         x5 = self.lrelu(self.conv5(x4)) # Deepest feature map (16)
-
-#         # -- Decoder (with skip connections) --
-#         # Up 1 (to 32)
-#         x5_up = F.interpolate(x5, scale_factor=2, mode='bilinear', align_corners=False)
-#         x6 = self.lrelu(self.conv6(x5_up + x4)) 
-        
-#         # Up 2 (to 64)
-#         x6_up = F.interpolate(x6, scale_factor=2, mode='bilinear', align_corners=False)
-#         x7 = self.lrelu(self.conv7(x6_up + x3)) 
-        
-#         # Up 3 (to 128)
-#         x7_up = F.interpolate(x7, scale_factor=2, mode='bilinear', align_corners=False)
-#         x8 = self.lrelu(self.conv8(x7_up + x2)) 
-        
-#         # Up 4 (to 256)
-#         x8_up = F.interpolate(x8, scale_factor=2, mode='bilinear', align_corners=False)
-#         x9 = self.lrelu(self.conv9(x8_up + x1))
-
-#         # Up 5 (to 512)
-#         x9_up = F.interpolate(x9, scale_factor=2, mode='bilinear', align_corners=False)
-#         x10 = self.lrelu(self.conv10(x9_up + x0))
-        
-#         # Final refinement and output map
-#         out = self.lrelu(self.conv11(x10))
-#         out = self.conv_last(out)
-        
-#         return out
+        return self.model(x)
