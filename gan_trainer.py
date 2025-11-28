@@ -41,9 +41,9 @@ def main():
         root_dir_hr=hr_path,
         transform=basic_transforms,
         mode="train",
-        batch_size=128,
+        batch_size=64,
         scale=8,
-        patch_size=64,
+        patch_size=80,
     )
 
     lr_path = datasetRoot+"/DIV2K_valid_LR_x8"
@@ -54,14 +54,14 @@ def main():
         root_dir_hr=hr_path,
         transform=basic_transforms,
         mode="val",
-        batch_size=128,
+        batch_size=64,
         scale=8,
     )
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
-        batch_size=4,
+        batch_size=2,
         pin_memory=True,
         num_workers=cpu_count(),
     )
@@ -124,7 +124,7 @@ class Trainer:
         self.epoch_losses_D = []
         self.epoch_losses_G = []
         self.vgg_extractor = VGGFeatureExtractor().to(self.device)
-        self.lambda_vgg = 0.2
+        self.lambda_vgg = 0.4
         self.l1_loss = nn.L1Loss()
 
     def compute_mse(self, img1, img2):
@@ -161,7 +161,7 @@ class Trainer:
         loss_perceptual = self.l1_loss(vgg_fake, vgg_real)
         
         # Combined Generator Loss
-        lambda_pixel = 0.5
+        lambda_pixel = 0.1
         
         loss_G = loss_adv + (self.lambda_vgg * loss_perceptual) + (lambda_pixel * loss_pixel)
         return loss_G
