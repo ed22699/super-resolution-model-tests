@@ -61,7 +61,7 @@ def main():
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
-        batch_size=2,
+        batch_size=4,
         pin_memory=True,
         num_workers=cpu_count(),
     )

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
-
 
 class SinusoidalPosEmb(nn.Module):
     """
@@ -50,208 +50,96 @@ class SinusoidalPosEmb(nn.Module):
         return emb
 
 
-class ConvBlock(nn.Conv2d):
-    """
-    A configurable 2D convolutional block that optionally applies
-    activation, dropout, and group normalization after the convolution.
+class ResBlock(nn.Module):
+    # A simplified Residual Block, often adapted from BigGAN or DDPM
+    def __init__(self, in_c, out_c, time_emb_dim, norm_groups=32):
+        super().__init__()
+        # Time embedding (FiLM modulation)
+        self.mlp = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(time_emb_dim, 2 * out_c) # Output two vectors for scale/shift
+        )
+        # Block layers
+        self.block = nn.Sequential(
+            nn.GroupNorm(norm_groups, in_c),
+            nn.SiLU(),
+            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
+            nn.GroupNorm(norm_groups, out_c),
+            nn.SiLU(),
+            nn.Conv2d(out_c, out_c, kernel_size=3, padding=1)
+        )
+        self.res_conv = nn.Conv2d(in_c, out_c, kernel_size=1) if in_c != out_c else nn.Identity()
 
-    Inherits directly from `nn.Conv2d`, meaning all convolution
-    parameters behave exactly the same as PyTorch's Conv2d module.
-
-    Attributes
-    ----------
-    activation_fn : nn.Module or None
-        Optional activation function applied after the convolution.
-        Currently uses `nn.SiLU` if enabled.
-    group_norm : nn.Module or None
-        Optional normalization layer. Uses `nn.GroupNorm` when enabled.
-    drop_rate : float
-        The dropout probability. (Dropout layer is applied only if > 0.)
-    """
-
-    def __init__(self, in_channels, out_channels, kernel_size,
-                 activation_fn=None, drop_rate=0., stride=1,
-                 padding='same', dilation=1, groups=1,
-                 bias=True, gn=False, gn_groups=8):
-        """
-        Initialize a convolutional block with optional activation,
-        dropout, and group normalization.
-
-        Parameters
-        ----------
-        in_channels : int
-            Number of channels in the input tensor.
-        out_channels : int
-            Number of channels produced by the convolution.
-        kernel_size : int
-            Size of the convolutional kernel.
-        activation_fn : bool, optional
-            If True, applies a SiLU activation after the convolution.
-        drop_rate : float, optional
-            Dropout probability. If 0, no dropout layer is applied.
-        stride : int, optional
-            Convolution stride. Default is 1.
-        padding : str or int, optional
-            If 'same', padding is automatically calculated to preserve
-            spatial dimensions (accounting for dilation). Otherwise,
-            can pass an integer for explicit padding.
-        dilation : int, optional
-            Spacing between kernel elements. Default is 1.
-        groups : int, optional
-            Number of blocked connections from input to output channels.
-        bias : bool, optional
-            If True, adds a learnable bias to the convolution.
-        gn : bool, optional
-            If True, enables Group Normalization after convolution.
-        gn_groups : int, optional
-            Number of groups to use for GroupNorm when `gn=True`.
-        """
-
-        if padding == 'same':
-            padding = kernel_size // 2 * dilation
-
-        super(ConvBlock, self).__init__(in_channels, out_channels, kernel_size,
-                                        stride=stride, padding=padding,
-                                        dilation=dilation,
-                                        groups=groups, bias=bias)
-
-        self.activation_fn = nn.SiLU() if activation_fn else None
-        self.group_norm = nn.GroupNorm(gn_groups, out_channels) if gn else None
-
-    def forward(self, x, time_embedding=None, residual=False):
-        """
-        forward pass through the convolutional block
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Batch of feature maps (batch_size, channels, height, width)
-        time_embedding : torch.Tensor, optional
-            Tensor containing timestep information
-        residual : bool
-            If true adds time_embedding to x
-
-        Returns
-        -------
-        torch.Tensor
-            Output tensor after convolution, normalization,
-            and activation.
-        """
-        if residual:
-            x = x + time_embedding
-            y = x
-            x = super(ConvBlock, self).forward(x)
-            y = y + x
-        else:
-            y = super(ConvBlock, self).forward(x)
-        y = self.group_norm(y) if self.group_norm is not None else y
-        y = self.activation_fn(y) if self.activation_fn is not None else y
-        return y
+    def forward(self, x, time_emb):
+        scale, shift = self.mlp(time_emb).chunk(2, dim=1) # Split into two for FiLM
+        
+        h = self.block(x)
+        # FiLM (Feature-wise Linear Modulation)
+        h = h * (scale.view(h.shape[0], h.shape[1], 1, 1) + 1) + shift.view(h.shape[0], h.shape[1], 1, 1)
+        
+        return h + self.res_conv(x)
 
 
-class Denoiser(nn.Module):
-    """
-    A model that removes noise from images at different steps of the diffusion
-    process.
+class SR3_UNet(nn.Module):
+    def __init__(self, in_channels=3, out_channels=3, inner_channel=64, 
+                 channel_mults=[1, 2, 4, 4, 8, 8], res_blocks=3, time_emb_dim=256):
+        super().__init__()
 
-    Attributes
-    ----------
-    time_embedding : nn.Module
-        Module that converts a scalar diffusion timestep into
-        a sinusoidal embedding vector of dimension
-        `diffusion_time_embedding_dim`.
+        self.time_embedding = SinusoidalPosEmb(time_emb_dim)
+        
+        # 1. Time Embedding Network (for the DDPM process)
+        self.time_mlp = nn.Sequential(
+            nn.Linear(time_emb_dim, time_emb_dim),
+            nn.SiLU(),
+            nn.Linear(time_emb_dim, time_emb_dim)
+        )
+        
+        # 2. LR Conditioning (Upsampling LR image to HR size)
+        # The LR image is upsampled and concatenated to the noisy HR image
+        self.lr_conditioner = nn.Sequential(
+            nn.Conv2d(in_channels * 2, inner_channel, kernel_size=3, padding=1),
+            # This convolution handles the concatenated LR image (upsampled) + Noisy HR image (after concatenation)
+        )
+        
+        # The true input channels = noisy_HR (3) + conditioned_LR (3)
+        input_c = in_channels * 2 
+        
+        # 3. U-Net Encoder/Decoder (using the channel_mults for structure)
+        
+        # --- Encoder (Downsampling) ---
+        # The number of downsampling steps is determined by len(channel_mults)
+        # The x8 factor is inherent in the U-Net structure required to reach the target resolution
+        
+        # 4. Final Output Layer
+        self.final_conv = nn.Conv2d(inner_channel * channel_mults[0], out_channels, kernel_size=3, padding=1)
 
-    in_project : ConvBlock
-        Initial convolutional projection that maps the input
-        image (img_C channels) into the hidden feature space.
-
-    time_project : nn.Sequential
-        Two-layer convolutional projection that transforms the
-        timestep embedding and produces features
-
-    convs : nn.ModuleList
-        A sequence of ConvBlocks that form the main body of the
-        denoising network.
-
-    out_project : ConvBlock
-        Final convolutional projection that maps the hidden
-        features back to an image with `img_C` channels.
-    """
-
-    def __init__(self, image_resolution, hidden_dims=[256, 256], diffusion_time_embedding_dim=256, n_times=1000):
-        """
-        Initialize the Denoiser network.
-
-        Parameters
-        ----------
-        image_resolution : tuple
-            A tuple (H, W, C) giving the input image resolution.
-
-        hidden_dims : [int], optional
-            Channel dimensions for each internal ConvBlock in the
-            network. Defines model capacity. Default [256, 256].
-
-        diffusion_time_embedding_dim : int, optional
-            Dimensionality of the sinusoidal timestep embedding.
-            Default is 256.
-
-        n_times : int, optional
-            Total number of diffusion steps. Default is 1000.
-        """
-        super(Denoiser, self).__init__()
-        _, _, img_C = image_resolution
-        self.time_embedding = SinusoidalPosEmb(diffusion_time_embedding_dim)
-        self.in_project = ConvBlock(img_C, hidden_dims[0], kernel_size=7)
-        self.time_project = nn.Sequential(
-            ConvBlock(diffusion_time_embedding_dim,
-                      hidden_dims[0], kernel_size=1, activation_fn=True),
-            ConvBlock(hidden_dims[0], hidden_dims[0], kernel_size=1))
-        self.convs = nn.ModuleList([ConvBlock(
-            in_channels=hidden_dims[0], out_channels=hidden_dims[0], kernel_size=3)])
-        for idx in range(1, len(hidden_dims)):
-            self.convs.append(ConvBlock(hidden_dims[idx-1], hidden_dims[idx], kernel_size=3, dilation=3**((idx-1)//2),
-                                        activation_fn=True, gn=True, gn_groups=8))
-        self.out_project = ConvBlock(
-            hidden_dims[-1], out_channels=img_C, kernel_size=3)
-
-    def forward(self, perturbed_x, diffusion_timestep):
-        """
-        Forward pass through the denoiser network.
-
-        Parameters
-        ----------
-        perturbed_x : torch.Tensor
-            A 4D tensor of shape (B, C, H, W) representing the noisy
-            input image batch.
-
-        diffusion_timestep : torch.Tensor
-            A 1D tensor of shape (B,) giving the diffusion timestep
-            for each sample in the batch, converted into a time embedding.
-
-        Returns
-        -------
-        torch.Tensor
-            A 4D tensor of shape (B, C, H, W) representing the predicted noise.
-        """
-        y = perturbed_x
-        diffusion_embedding = self.time_embedding(diffusion_timestep)
-        diffusion_embedding = self.time_project(
-            diffusion_embedding.unsqueeze(-1).unsqueeze(-2))
-        y = self.in_project(y)
-        for i in range(len(self.convs)):
-            y = self.convs[i](y, diffusion_embedding, residual=True)
-        y = self.out_project(y)
-        return y
-        y = perturbed_x
-        diffusion_embedding = self.time_embedding(diffusion_timestep)
-        diffusion_embedding = self.time_project(
-            diffusion_embedding.unsqueeze(-1).unsqueeze(-2))
-        y = self.in_project(y)
-        for i in range(len(self.convs)):
-            y = self.convs[i](y, diffusion_embedding, residual=True)
-        y = self.out_project(y)
-        return y
-
+    def forward(self, noisy_hr_img, lr_img, t):
+        # 1. Time Embedding
+        t_emb = self.time_embedding(t)
+        time_emb = self.time_mlp(t_emb)
+        
+        # 2. Condition on LR Image
+        # To condition on LR, we must upsample the LR image to the HR size
+        # This is typically done via simple interpolation (bicubic) and concatenated with the noisy HR image
+        
+        # Assumes lr_img is (B, C, H/8, W/8) and noisy_hr_img is (B, C, H, W)
+        hr_size = noisy_hr_img.shape[-2:]
+        upsampled_lr = F.interpolate(lr_img, size=hr_size, mode='bicubic', align_corners=False)
+        
+        # Concatenate the condition (LR) and the noisy signal (HR)
+        x = torch.cat([noisy_hr_img, upsampled_lr], dim=1) 
+        
+        # 3. Initial Conv to adjust channels
+        x = self.lr_conditioner(x)
+        
+        # --- U-Net forward pass (omitted for brevity) ---
+        # The actual forward path involves:
+        # 1. Downsampling blocks (ResBlock + AvgPool)
+        # 2. Bottleneck blocks (ResBlock + Attention)
+        # 3. Upsampling blocks (ResBlock + Upsample/ConvTranspose) with skip connections
+        
+        # 4. Final Output (Predicts the noise, or the cleaned image)
+        return self.final_conv(x)
 
 class Diffusion(nn.Module):
     """
@@ -288,7 +176,7 @@ class Diffusion(nn.Module):
         Device used for computation.
     """
 
-    def __init__(self, model, image_resolution=[28, 28, 1], n_times=1000, beta_minmax=[1e-4, 2e-2], device='cuda'):
+    def __init__(self, model, image_resolution=[640, 640, 3], n_times=1000, device='cuda'):
         """
         Initialises the diffusion model
 
@@ -317,17 +205,33 @@ class Diffusion(nn.Module):
         self.img_H, self.img_W, self.img_C = image_resolution
         self.model = model
         # Define linear variance schedule (betas)
-        beta_1, beta_T = beta_minmax
-        betas = torch.linspace(start=beta_1, end=beta_T, steps=n_times).to(
-            device)  # follows DDPM paper: cosine function instead of linear?
+        betas = self.cosine_schedule(n_times).to(device)
+
         self.sqrt_betas = torch.sqrt(betas)
         # Define alphas for forward diffusion process
         self.alphas = 1 - betas
         self.sqrt_alphas = torch.sqrt(self.alphas)
         alpha_bars = torch.cumprod(self.alphas, dim=0)
-        self.sqrt_one_minus_alpha_bars = torch.sqrt(1-alpha_bars)
         self.sqrt_alpha_bars = torch.sqrt(alpha_bars)
+        alpha_bars_full = torch.cat([torch.tensor([1.0]).to(device), alpha_bars]) 
+        alpha_bars_prev = alpha_bars_full[:-1]
+
+        # Calculate posterior variance (tilde_beta)
+        self.posterior_variance = (1 - alpha_bars_prev) / (1 - alpha_bars) * betas
+        self.sqrt_posterior_variance = torch.sqrt(self.posterior_variance)
+
+        self.sqrt_one_minus_alpha_bars = torch.sqrt(1-alpha_bars)
         self.device = device
+
+    def cosine_schedule(self, num_timesteps, s=0.008):
+        def f(t):
+            return torch.cos((t / num_timesteps + s) / (1 + s) * 0.5 * torch.pi) ** 2
+
+        x = torch.linspace(0, num_timesteps, num_timesteps + 1)
+        alphas_cumprod = f(x) / f(torch.tensor([0]))
+        betas = 1 - alphas_cumprod[1:] / alphas_cumprod[:-1]
+        betas = torch.clip(betas, 0.0001, 0.02)
+        return betas
 
     def extract(self, a, t, x_shape):
         """
@@ -419,7 +323,7 @@ class Diffusion(nn.Module):
         noisy_sample = x_zeros * sqrt_alpha_bar + epsilon * sqrt_one_minus_alpha_bar
         return noisy_sample.detach(), epsilon
 
-    def forward(self, x_zeros):
+    def forward(self, lr_img, hr_img):
         """
         Perform a full DDPM training step:
             1. Scale images to [-1, 1].
@@ -429,8 +333,10 @@ class Diffusion(nn.Module):
 
         Parameters
         ----------
-        x_zeros : torch.Tensor (B, C, H, W)
-            Clean input images in range [0, 1].
+        lr_img : torch.Tensor (B, C, H, W)
+            Low resolution input images in range [0, 1].
+        hr_img : torch.Tensor (B, C, H, W)
+            High resolution images in range [0, 1].
 
         Returns
         -------
@@ -443,18 +349,25 @@ class Diffusion(nn.Module):
         pred_epsilon : torch.Tensor
             Model prediction of noise for loss computation.
         """
-        x_zeros = self.scale_to_minus_one_to_one(x_zeros)
-        B, _, _, _ = x_zeros.shape
-        # 1. Randomly select a diffusion time-step `t`
-        t = torch.randint(low=0, high=self.n_times,
-                          size=(B,)).long().to(self.device)
-        # 2. Forward diffusion: perturb `x_zeros` using the fixed variance schedule
-        perturbed_images, epsilon = self.make_noisy(x_zeros, t)
-        # 3. Predict the noise (`epsilon`) given the perturbed image at time-step `t`
-        pred_epsilon = self.model(perturbed_images, t)
+
+        # 1. Scale images to [-1, 1]
+        hr_img_scaled = self.scale_to_minus_one_to_one(hr_img)
+        lr_img_scaled = self.scale_to_minus_one_to_one(lr_img)
+        
+        B, _, _, _ = hr_img_scaled.shape
+        
+        # 2. Randomly select a diffusion time-step `t`
+        t = torch.randint(low=0, high=self.n_times, size=(B,)).long().to(self.device)
+        
+        # 3. Forward diffusion: perturb HR image (x_0)
+        perturbed_images, epsilon = self.make_noisy(hr_img_scaled, t)
+        
+        # 4. Predict the noise (epsilon) using the CONDITIONAL model
+        pred_epsilon = self.model(perturbed_images, lr_img_scaled, t)
+        
         return perturbed_images, epsilon, pred_epsilon
 
-    def denoise_at_t(self, x_t, timestep, t):
+    def denoise_at_t(self, x_t, lr_img_scaled, timestep, t):
         """
         Perform one reverse denoising step, computing x_{t-1} from x_t.
 
@@ -482,40 +395,80 @@ class Diffusion(nn.Module):
             z = torch.zeros_like(x_t).to(self.device)
         # at inference, we use predicted noise(epsilon) to restore perturbed data sample.
         # Use the model to predict noise (`epsilon_pred`) given `x_t` at `timestep`
-        epsilon_pred = self.model(x_t, timestep)
+        epsilon_pred = self.model(x_t, lr_img_scaled, timestep)
         alpha = self.extract(self.alphas, timestep, x_t.shape)
         sqrt_alpha = self.extract(self.sqrt_alphas, timestep, x_t.shape)
         sqrt_one_minus_alpha_bar = self.extract(
             self.sqrt_one_minus_alpha_bars, timestep, x_t.shape)
-        sqrt_beta = self.extract(self.sqrt_betas, timestep, x_t.shape)
+        sqrt_posterior_variance = self.extract(self.sqrt_posterior_variance, timestep, x_t.shape)
         # denoise at time t, denoise `x_t` to estimate `x_{t-1}`
         x_t_minus_1 = 1 / sqrt_alpha * \
-            (x_t - (1-alpha)/sqrt_one_minus_alpha_bar*epsilon_pred) + sqrt_beta*z
+            (x_t - (1-alpha)/sqrt_one_minus_alpha_bar*epsilon_pred) + sqrt_posterior_variance*z
         return x_t_minus_1.clamp(-1., 1)
 
-    def sample(self, N):
+    def sample(self, lr_img):
         """
         Generate new images by denoising pure Gaussian noise.
 
         Parameters
         ----------
-        N : int
-            Number of images to sample.
+        lr_img : torch.Tensor (B, C, H, W)
+            The low resolition image to be sampled.
 
         Returns
         -------
         torch.Tensor (N, C, H, W)
             Fully denoised images in range [0, 1].
         """
-        # Start from random noise vector `x_T`, x_0 (for simplicity, x_T declared as x_t instead of x_T)
-        x_t = torch.randn((N, self.img_C, self.img_H,
-                          self.img_W)).to(self.device)
-        # Autoregressively denoise from `x_T` to `x_0`
-        #     i.e., generate image from noise, x_T
-        for t in range(self.n_times-1, -1, -1):
-            timestep = torch.tensor([t]).repeat_interleave(
-                N, dim=0).long().to(self.device)
-            x_t = self.denoise_at_t(x_t, timestep, t)
-        # Convert the final result `x_0` back to [0, 1] range
+        N = lr_img.shape[0]
+        # 1. Prepare LR image condition
+        lr_img_scaled = self.scale_to_minus_one_to_one(lr_img)
+        
+        # 2. Start from random noise vector x_T at the HR size
+        _, C, H, W = lr_img_scaled.shape
+        x_t = torch.randn((N, self.img_C, H * 8, W * 8)).to(self.device) # Assuming x8 upscale
+        
+        # 3. Autoregressively denoise
+        for t in range(self.n_times - 1, -1, -1):
+            timestep = torch.tensor([t]).repeat_interleave(N, dim=0).long().to(self.device)
+            
+            # Pass the fixed LR condition to the denoise step
+            x_t = self.denoise_at_t(x_t, lr_img_scaled, timestep, t) # <--- PASS LR_IMG_SCALED
+            
+        # Convert the final result x_0 back to [0, 1] range
+        x_0 = self.reverse_scale_to_zero_to_one(x_t)
+        return x_0
+
+    def speedSample(self, lr_img):
+        """
+        Generate new images by denoising pure Gaussian noise, smaller subsampling so completes faster
+
+        Parameters
+        ----------
+        lr_img : torch.Tensor (B, C, H, W)
+            The low resolition image to be sampled.
+
+        Returns
+        -------
+        torch.Tensor (N, C, H, W)
+            Fully denoised images in range [0, 1].
+        """
+        N = lr_img.shape[0]
+        S = 100
+        # 1. Prepare LR image condition
+        lr_img_scaled = self.scale_to_minus_one_to_one(lr_img)
+        
+        # 2. Start from random noise vector x_T at the HR size
+        _, C, H, W = lr_img_scaled.shape
+        x_t = torch.randn((N, self.img_C, H * 8, W * 8)).to(self.device) # Assuming x8 upscale
+        
+        # 3. Autoregressively denoise
+        for t in range(self.n_times - 1, 0, -self.n_times // S):
+            timestep = torch.tensor([t]).repeat_interleave(N, dim=0).long().to(self.device)
+            
+            # Pass the fixed LR condition to the denoise step
+            x_t = self.denoise_at_t(x_t, lr_img_scaled, timestep, t) # <--- PASS LR_IMG_SCALED
+            
+        # Convert the final result x_0 back to [0, 1] range
         x_0 = self.reverse_scale_to_zero_to_one(x_t)
         return x_0
