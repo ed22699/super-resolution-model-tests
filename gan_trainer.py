@@ -17,6 +17,8 @@ from gan_dataloader import GANDIV2KDataLoader
 from gan import Generator, Discriminator, VGGFeatureExtractor
 from utils.save_checkpoint import save_checkpoint
 import torchvision.transforms.functional as TF
+import torchvision.transforms as T
+from torchvision.transforms import v2
 import random
 
 # Alert messages
@@ -28,9 +30,14 @@ def main():
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Load and preprocess the dataset
-    transformList = []
-    transformList.append(transforms.ToTensor())
-    basic_transforms = transforms.Compose(transformList)
+    basic_transforms_Lr = T.Compose([
+        T.ToTensor(),  
+        v2.GaussianNoise(mean=0.0, sigma=0.1, clip=True)
+    ])
+    basic_transforms_Hr = T.Compose([
+        T.ToTensor(),  
+        v2.GaussianNoise(mean=0.0, sigma=0.1, clip=True)
+    ])
 
     datasetRoot = "DIV2K"
     lr_path = datasetRoot+"/DIV2K_train_LR_x8"
@@ -39,7 +46,8 @@ def main():
     train_dataset = GANDIV2KDataLoader(
         root_dir_lr=lr_path,
         root_dir_hr=hr_path,
-        transform=basic_transforms,
+        transformLr=basic_transforms_Lr,
+        transformHr=basic_transforms_Hr,
         mode="train",
         batch_size=64,
         scale=8,
@@ -52,7 +60,8 @@ def main():
     val_dataset = GANDIV2KDataLoader(
         root_dir_lr=lr_path,
         root_dir_hr=hr_path,
-        transform=basic_transforms,
+        transformLr=basic_transforms_Lr,
+        transformHr=basic_transforms_Hr,
         mode="val",
         batch_size=64,
         scale=8,
@@ -113,9 +122,9 @@ class Trainer:
         self.val_loader = val_loader
 
         # Directories
-        self.checkpoint_dir = 'super-resolution-model-tests/training_checkpoints'
+        self.checkpoint_dir = 'super-resolution-model-tests/gan/training_checkpoints'
         os.makedirs(self.checkpoint_dir, exist_ok=True)
-        self.image_dir = 'super-resolution-model-tests/generated_image/'
+        self.image_dir = 'super-resolution-model-tests/gan/generated_image/'
         os.makedirs(self.image_dir, exist_ok=True)
 
         # Loss
@@ -237,44 +246,54 @@ class Trainer:
         scale_factor = self.val_loader.dataset.scale
 
         # Loop over the entire validation loader
+
         for idx, (lr_img_full, hr_img_full) in enumerate(self.val_loader):
-        
+            
             _, _, H_lr, W_lr = lr_img_full.shape
-        
+            
             TILE_SIZE = 128
+            OVERLAP = 32  # Define overlap amount (e.g., 25% of tile size)
+            STRIDE = TILE_SIZE - OVERLAP
 
-            # Calculate number of tiles needed
-            num_h = H_lr // TILE_SIZE + (1 if H_lr % TILE_SIZE != 0 else 0)
-            num_w = W_lr // TILE_SIZE + (1 if W_lr % TILE_SIZE != 0 else 0)
-
-            # Create an empty tensor to store the stitched SR image
+            # Create tensors to store the stitched image and a counter
             H_sr = H_lr * scale_factor
             W_sr = W_lr * scale_factor
-            sr_img_stitched = torch.zeros(hr_img_full.shape[1], H_sr, W_sr, dtype=hr_img_full.dtype)
+            sr_img_stitched = torch.zeros(hr_img_full.shape[1], H_sr, W_sr, dtype=hr_img_full.dtype).to(self.device)
+            stitch_counter = torch.zeros(hr_img_full.shape[1], H_sr, W_sr, dtype=hr_img_full.dtype).to(self.device)
 
-            # Tiling and Stitching Loop
             with torch.no_grad():
-                for i in range(num_h):
-                    for j in range(num_w):
-                        # Patch
-                        start_h_lr = i * TILE_SIZE
-                        end_h_lr = min((i + 1) * TILE_SIZE, H_lr)
-                        start_w_lr = j * TILE_SIZE
-                        end_w_lr = min((j + 1) * TILE_SIZE, W_lr)
+                # Loop with STRIDE instead of TILE_SIZE
+                for h_start in range(0, H_lr, STRIDE):
+                    for w_start in range(0, W_lr, STRIDE):
+                        # Define LR patch coordinates
+                        h_end = min(h_start + TILE_SIZE, H_lr)
+                        w_end = min(w_start + TILE_SIZE, W_lr)
+                        
+                        # Adjust start if we are at the end to ensure full tile size
+                        h_start_actual = max(0, h_end - TILE_SIZE)
+                        w_start_actual = max(0, w_end - TILE_SIZE)
+
+                        # Extract LR patch
+                        lr_patch = lr_img_full[:, :, h_start_actual:h_end, w_start_actual:w_end].to(self.device)
                     
-                        lr_patch = lr_img_full[:, :, start_h_lr:end_h_lr, start_w_lr:end_w_lr].to(self.device)
-                    
-                        # Generate
-                        sr_patch = self.gan_G(lr_patch).cpu().squeeze(0)
+                        # Generate SR patch
+                        sr_patch = self.gan_G(lr_patch).squeeze(0) # Keep on device for now
 
-                        # Stitch
-                        start_h_sr = start_h_lr * scale_factor
-                        end_h_sr = end_h_lr * scale_factor
-                        start_w_sr = start_w_lr * scale_factor
-                        end_w_sr = end_w_lr * scale_factor
+                        # Define SR patch coordinates
+                        h_start_sr = h_start_actual * scale_factor
+                        h_end_sr = h_end * scale_factor
+                        w_start_sr = w_start_actual * scale_factor
+                        w_end_sr = w_end * scale_factor
 
-                        sr_img_stitched[:, start_h_sr:end_h_sr, start_w_sr:end_w_sr] = sr_patch
+                        # Add patch to stiched image and increment counter
+                        sr_img_stitched[:, h_start_sr:h_end_sr, w_start_sr:w_end_sr] += sr_patch
+                        stitch_counter[:, h_start_sr:h_end_sr, w_start_sr:w_end_sr] += 1.0
 
+            # Divide by counter to average overlapping regions
+            sr_img_stitched /= stitch_counter
+
+            # Move back to CPU for final processing
+            sr_img_stitched = sr_img_stitched.cpu()
             hr_img_vis = hr_img_full.squeeze(0).clamp(0, 1)
             sr_img_vis = sr_img_stitched.clamp(0, 1)
 
@@ -317,6 +336,97 @@ class Trainer:
         print(f'Validation Average PSNR (Full Image Tiling): {avg_psnr:.4f}')
 
         self.gan_G.train()
+
+    # def visualise_validation_set(self, epoch):
+    #     self.gan_G.eval()
+
+    #     total_psnr = 0.0
+    #     count = 0
+    #     imageChosenNum = random.randint(0, self.val_loader.dataset.__len__() - 1)
+    #     imageChosen = None
+    #     scale_factor = self.val_loader.dataset.scale
+
+    #     # Loop over the entire validation loader
+    #     for idx, (lr_img_full, hr_img_full) in enumerate(self.val_loader):
+        
+    #         _, _, H_lr, W_lr = lr_img_full.shape
+        
+    #         TILE_SIZE = 128
+
+    #         # Calculate number of tiles needed
+    #         num_h = H_lr // TILE_SIZE + (1 if H_lr % TILE_SIZE != 0 else 0)
+    #         num_w = W_lr // TILE_SIZE + (1 if W_lr % TILE_SIZE != 0 else 0)
+
+    #         # Create an empty tensor to store the stitched SR image
+    #         H_sr = H_lr * scale_factor
+    #         W_sr = W_lr * scale_factor
+    #         sr_img_stitched = torch.zeros(hr_img_full.shape[1], H_sr, W_sr, dtype=hr_img_full.dtype)
+
+    #         # Tiling and Stitching Loop
+    #         with torch.no_grad():
+    #             for i in range(num_h):
+    #                 for j in range(num_w):
+    #                     # Patch
+    #                     start_h_lr = i * TILE_SIZE
+    #                     end_h_lr = min((i + 1) * TILE_SIZE, H_lr)
+    #                     start_w_lr = j * TILE_SIZE
+    #                     end_w_lr = min((j + 1) * TILE_SIZE, W_lr)
+                    
+    #                     lr_patch = lr_img_full[:, :, start_h_lr:end_h_lr, start_w_lr:end_w_lr].to(self.device)
+                    
+    #                     # Generate
+    #                     sr_patch = self.gan_G(lr_patch).cpu().squeeze(0)
+
+    #                     # Stitch
+    #                     start_h_sr = start_h_lr * scale_factor
+    #                     end_h_sr = end_h_lr * scale_factor
+    #                     start_w_sr = start_w_lr * scale_factor
+    #                     end_w_sr = end_w_lr * scale_factor
+
+    #                     sr_img_stitched[:, start_h_sr:end_h_sr, start_w_sr:end_w_sr] = sr_patch
+
+    #         hr_img_vis = hr_img_full.squeeze(0).clamp(0, 1)
+    #         sr_img_vis = sr_img_stitched.clamp(0, 1)
+
+    #         # Align sizing issues from patching
+    #         H = min(hr_img_vis.shape[1], sr_img_vis.shape[1])
+    #         W = min(hr_img_vis.shape[2], sr_img_vis.shape[2])
+    #         hr_img_vis = hr_img_vis[:, :H, :W]
+    #         sr_img_vis = sr_img_vis[:, :H, :W]
+
+    #         # Calculate PSNR for this image
+    #         mse_sr = self.compute_mse(hr_img_vis, sr_img_vis).item()
+    #         psnr_sr = self.compute_psnr(mse_sr).item()
+        
+    #         # Accumulate PSNR
+    #         total_psnr += psnr_sr
+    #         count += 1
+
+    #         # Grid
+    #         if idx == imageChosenNum:
+    #             lr_resized_vis = F.interpolate(lr_img_full, 
+    #                                            scale_factor=scale_factor, 
+    #                                            mode='nearest').squeeze(0).clamp(0, 1)
+
+    #             comparison = torch.stack([lr_resized_vis, sr_img_vis, hr_img_vis], dim=0)
+    #             grid = torchvision.utils.make_grid(comparison, nrow=3, value_range=(0,1))
+    #             grid_np = grid.permute(1,2,0).numpy()
+    #             first_image_grid = (grid_np * 255).astype(np.uint8)
+
+    #     avg_psnr = total_psnr / count if count > 0 else 0.0
+
+    #     # Save Checkpoint
+    #     if self.best_psnr < avg_psnr:
+    #         self.best_psnr = avg_psnr
+    #         save_checkpoint(epoch, avg_psnr, self.gan_G, self.gan_D, self.checkpoint_dir)
+    #         alert.send_notification(f"New best AVG PSNR: Epoch {epoch + 1}  PSNR: {avg_psnr:.2f}")
+    #         filename = f"{self.image_dir}/top_image.png"
+    #         Image.fromarray(first_image_grid).save(filename)
+
+    #     # Print Final PSNR value
+    #     print(f'Validation Average PSNR (Full Image Tiling): {avg_psnr:.4f}')
+
+    #     self.gan_G.train()
 
     def visualise_loss(self, losses_D, losses_G, image_dir, loss_type):
         plt.figure(figsize=(10, 5))

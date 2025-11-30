@@ -32,10 +32,10 @@ def main():
         'timestep_embedding_dim': 256,
         'n_layers': 8,
         'hidden_dim': 32,
-        'n_timesteps': 200,
+        'n_timesteps': 600,
         'train_batch_size': 128,
         'inference_batch_size': 64,
-        'lr': 1e-5,
+        'lr': 1e-4,
         'epochs': 1000,
         'seed': 42,
     }
@@ -63,9 +63,10 @@ def main():
     train_dataset = GANDIV2KDataLoader(
         root_dir_lr=lr_path,
         root_dir_hr=hr_path,
-        transform=basic_transforms,
+        transformLr=basic_transforms,
+        transformHr=basic_transforms,
         mode="train",
-        batch_size=32,
+        batch_size=16,
         scale=8,
         patch_size=80,
     )
@@ -76,7 +77,8 @@ def main():
     val_dataset = GANDIV2KDataLoader(
         root_dir_lr=lr_path,
         root_dir_hr=hr_path,
-        transform=basic_transforms,
+        transformLr=basic_transforms,
+        transformHr=basic_transforms,
         mode="val",
         batch_size=4,
         scale=8,
@@ -85,7 +87,7 @@ def main():
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
-        batch_size=1,
+        batch_size=2,
         pin_memory=True,
         num_workers=cpu_count(),
     )
@@ -176,6 +178,7 @@ class Trainer:
     def loopEpochs(self, num_epoch):
         self.model.train()
         scaler = torch.amp.GradScaler('cuda')
+        # accumulation_steps = 16 # Virtual Batch Size = 8 * 4 = 32
 
         for epoch in range(num_epoch):
             if self.device.type == 'cuda':
@@ -198,13 +201,21 @@ class Trainer:
                     loss = self.loss_func(pred_noise, noise)
 
                 scaler.scale(loss).backward()
+                # if (idx + 1) % accumulation_steps == 0:
+                #     scaler.step(self.optimizer)
+                #     scaler.update()
+                #     self.optimizer.zero_grad()
+                #     torch.cuda.empty_cache()
+                
+                # # Multiply back for logging
+                # total_loss += loss.item() * accumulation_steps
                 scaler.step(self.optimizer)
                 scaler.update()
                 torch.cuda.empty_cache()
                 total_loss += loss
 
             # losses once per epoch
-            print(f'Epoch [{epoch + 1}/{num_epoch}]  | Loss {total_loss / len(self.train_loader)} | Time: {time.time() - start_time:.2f} sec')
+            print(f'Epoch [{epoch + 1}/{num_epoch}]  | Loss {total_loss / (len(self.train_loader))} | Time: {time.time() - start_time:.2f} sec')
             if (epoch + 1) % 10 == 0:
                 # debug_step_stats(hr_img, lr_img, t, noise, pred_noise)
                 x0_pred = reconstruct_x0_from_xt(x_t, pred_noise, t, self.diffusion.alpha_cumprod.to(hr_img.device))
@@ -216,7 +227,7 @@ class Trainer:
                 print("PSNR (reconstruction at t=10):", psnr_torch(x0_pred, x0_gt, data_range=1.0))
 
             # Visualise the generated image at different epochs
-            if (epoch + 1) % 50 == 0:
+            if ((epoch + 1) % 50 == 0 and epoch >= 500) or (epoch + 1 == 50):
                 # self.visualise_generated_images(epoch)
                 self.visualise_validation_set(epoch)
             
@@ -225,75 +236,193 @@ class Trainer:
 
     def visualise_validation_set(self, epoch):
         self.model.eval()
-
         total_psnr = 0.0
         count = 0
-        imageChosen = None
+        
+        # Settings
         scale_factor = self.val_loader.dataset.scale
-        num_images = 1
-        # num_images = self.val_loader.dataset.__len__() // 10 # only check on a 5th of the set
-        imageChosenNum = random.randint(0, num_images - 1)
+        # LR tile size. Output will be tile_size * scale (e.g. 32*8 = 256)
+        # 32 is a safe number for VRAM. You can try 64 if you have a 3090/4090.
+        lr_tile_size = 32 
+        
+        # Only process a few images to save time, or remove this to process all
+        num_images_to_check = 1 
+        imageChosenNum = random.randint(0, num_images_to_check - 1)
 
-        # Loop over the entire validation loader
         for idx, (lr_img_full, hr_img_full) in enumerate(self.val_loader):
+            if idx >= num_images_to_check:
+                break
+                
             start_time = time.time()
             lr_img_full = lr_img_full.to(self.device)
             hr_img_full = hr_img_full.to(self.device)
             
-            with torch.no_grad():
-                B, C, H, W = lr_img_full.shape
-                sr_img = self.diffusion.sample(lr_img_full, shape=(B, C, H*self.scale, W*self.scale)).to(self.device).squeeze(0)
-                
-            hr_img_vis = hr_img_full.squeeze(0)
-            hr_img_vis = (hr_img_vis.clamp(-1, 1) + 1) / 2
-            # sr_img_vis = sr_img.clamp(0, 1)
-            sr_img_vis = (sr_img.clamp(-1, 1) + 1) / 2
+            # 1. PREPARE TILES
+            B, C, H, W = lr_img_full.shape
+            
+            # Calculate how many tiles we need
+            h_steps = (H // lr_tile_size) + (1 if H % lr_tile_size != 0 else 0)
+            w_steps = (W // lr_tile_size) + (1 if W % lr_tile_size != 0 else 0)
+            
+            patches = []
+            coords = [] # Keep track of where to put them back
 
-            # Align sizing issues from patching
+            for i in range(h_steps):
+                for j in range(w_steps):
+                    # Define crop coordinates
+                    h_start = i * lr_tile_size
+                    h_end = min(h_start + lr_tile_size, H)
+                    w_start = j * lr_tile_size
+                    w_end = min(w_start + lr_tile_size, W)
+                    
+                    # Crop LR patch
+                    patch = lr_img_full[:, :, h_start:h_end, w_start:w_end]
+                    
+                    # Pad if the patch is smaller than tile size (edge cases)
+                    pad_h = lr_tile_size - (h_end - h_start)
+                    pad_w = lr_tile_size - (w_end - w_start)
+                    if pad_h > 0 or pad_w > 0:
+                        patch = F.pad(patch, (0, pad_w, 0, pad_h), mode='constant', value=0)
+                        
+                    patches.append(patch)
+                    coords.append((h_start, h_end, w_start, w_end, pad_h, pad_w))
+
+            # 2. BATCH INFERENCE (The Speedup)
+            # Stack all patches into one tensor: (Num_Tiles, 3, 32, 32)
+            batch_patches = torch.cat(patches, dim=0)
+            
+            with torch.no_grad():
+                # Run Diffusion ONCE on the whole batch
+                # Output shape: (Num_Tiles, 3, 256, 256)
+                sr_patches = self.diffusion.sample(
+                    batch_patches, 
+                    shape=(batch_patches.shape[0], 3, lr_tile_size*scale_factor, lr_tile_size*scale_factor)
+                )
+
+            # 3. STITCH BACK TOGETHER
+            # Create empty canvas
+            H_sr, W_sr = H * scale_factor, W * scale_factor
+            sr_img_full = torch.zeros((1, 3, H_sr, W_sr), device=self.device)
+
+            for k in range(len(coords)):
+                h_start, h_end, w_start, w_end, pad_h, pad_w = coords[k]
+                
+                # Get the generated patch
+                sr_patch = sr_patches[k]
+                
+                # Remove padding if we added it (output side)
+                if pad_h > 0 or pad_w > 0:
+                    sr_patch = sr_patch[:, :sr_patch.shape[1] - (pad_h*scale_factor), :sr_patch.shape[2] - (pad_w*scale_factor)]
+
+                # Place into canvas
+                sr_img_full[:, :, h_start*scale_factor:h_end*scale_factor, w_start*scale_factor:w_end*scale_factor] = sr_patch
+
+            # 4. METRICS & VISUALIZATION (Standard logic)
+            hr_img_vis = (hr_img_full.squeeze(0).clamp(-1, 1) + 1) / 2
+            sr_img_vis = (sr_img_full.squeeze(0).clamp(-1, 1) + 1) / 2
+            
+            # Align
             H = min(hr_img_vis.shape[1], sr_img_vis.shape[1])
             W = min(hr_img_vis.shape[2], sr_img_vis.shape[2])
             hr_img_vis = hr_img_vis[:, :H, :W]
             sr_img_vis = sr_img_vis[:, :H, :W]
 
-            # Calculate PSNR for this image
+            # Compute PSNR
             mse_sr = self.compute_mse(hr_img_vis, sr_img_vis).item()
             psnr_sr = self.compute_psnr(mse_sr).item()
-        
-            # Accumulate PSNR
             total_psnr += psnr_sr
             count += 1
-
+            
             print(f'Image Build Time: {time.time() - start_time:.2f} sec')
 
-            # Grid
+            # Save Grid (Only for the chosen image)
             if idx == imageChosenNum:
-                lr_resized_vis = (F.interpolate(lr_img_full, 
-                                               scale_factor=scale_factor, 
-                                               mode='nearest').squeeze(0).clamp(-1, 1) + 1) / 2
-
+                lr_resized_vis = (F.interpolate(lr_img_full, scale_factor=scale_factor, mode='nearest').squeeze(0).clamp(-1, 1) + 1) / 2
                 comparison = torch.stack([lr_resized_vis, sr_img_vis, hr_img_vis], dim=0)
                 grid = torchvision.utils.make_grid(comparison, nrow=3, value_range=(0,1))
-                grid_np = grid.permute(1,2,0).cpu().numpy()
-                first_image_grid = (grid_np * 255).astype(np.uint8)
-
-            if num_images - 1 == idx:
-                break
+                Image.fromarray((grid.permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)).save(f"{self.image_dir}/top_image.png")
 
         avg_psnr = total_psnr / count if count > 0 else 0.0
-
-        # Save Checkpoint
-        if self.best_psnr < avg_psnr:
-            self.best_psnr = avg_psnr
-            save_checkpoint(epoch, avg_psnr, self.model, self.checkpoint_dir)
-            alert.send_notification(f"New best AVG PSNR: Epoch {epoch + 1}  PSNR: {avg_psnr:.2f}")
-
-        filename = f"{self.image_dir}/top_image.png"
-        Image.fromarray(first_image_grid).save(filename)
-
-        # Print Final PSNR value
         print(f'Validation Average PSNR (Full Image Tiling): {avg_psnr:.4f}')
 
+        # Save Checkpoint Logic...
+        if self.best_psnr < avg_psnr:
+             self.best_psnr = avg_psnr
+             save_checkpoint(epoch, avg_psnr, self.model, self.checkpoint_dir)
+             alert.send_notification(f"New best AVG PSNR: Epoch {epoch + 1}  PSNR: {avg_psnr:.2f}")
+        
         self.model.train()
+    # def visualise_validation_set(self, epoch):
+    #     self.model.eval()
+
+    #     total_psnr = 0.0
+    #     count = 0
+    #     imageChosen = None
+    #     scale_factor = self.val_loader.dataset.scale
+    #     num_images = 1
+    #     # num_images = self.val_loader.dataset.__len__() // 10 # only check on a 5th of the set
+    #     imageChosenNum = random.randint(0, num_images - 1)
+
+    #     # Loop over the entire validation loader
+    #     for idx, (lr_img_full, hr_img_full) in enumerate(self.val_loader):
+    #         start_time = time.time()
+    #         lr_img_full = lr_img_full.to(self.device)
+    #         hr_img_full = hr_img_full.to(self.device)
+            
+    #         with torch.no_grad():
+    #             B, C, H, W = lr_img_full.shape
+    #             sr_img = self.diffusion.sample(lr_img_full, shape=(B, C, H*self.scale, W*self.scale)).to(self.device).squeeze(0)
+                
+    #         hr_img_vis = hr_img_full.squeeze(0)
+    #         hr_img_vis = (hr_img_vis.clamp(-1, 1) + 1) / 2
+    #         # sr_img_vis = sr_img.clamp(0, 1)
+    #         sr_img_vis = (sr_img.clamp(-1, 1) + 1) / 2
+
+    #         # Align sizing issues from patching
+    #         H = min(hr_img_vis.shape[1], sr_img_vis.shape[1])
+    #         W = min(hr_img_vis.shape[2], sr_img_vis.shape[2])
+    #         hr_img_vis = hr_img_vis[:, :H, :W]
+    #         sr_img_vis = sr_img_vis[:, :H, :W]
+
+    #         # Calculate PSNR for this image
+    #         mse_sr = self.compute_mse(hr_img_vis, sr_img_vis).item()
+    #         psnr_sr = self.compute_psnr(mse_sr).item()
+        
+    #         # Accumulate PSNR
+    #         total_psnr += psnr_sr
+    #         count += 1
+
+    #         print(f'Image Build Time: {time.time() - start_time:.2f} sec')
+
+    #         # Grid
+    #         if idx == imageChosenNum:
+    #             lr_resized_vis = (F.interpolate(lr_img_full, 
+    #                                            scale_factor=scale_factor, 
+    #                                            mode='nearest').squeeze(0).clamp(-1, 1) + 1) / 2
+
+    #             comparison = torch.stack([lr_resized_vis, sr_img_vis, hr_img_vis], dim=0)
+    #             grid = torchvision.utils.make_grid(comparison, nrow=3, value_range=(0,1))
+    #             grid_np = grid.permute(1,2,0).cpu().numpy()
+    #             first_image_grid = (grid_np * 255).astype(np.uint8)
+
+    #         if num_images - 1 == idx:
+    #             break
+
+    #     avg_psnr = total_psnr / count if count > 0 else 0.0
+
+    #     # Save Checkpoint
+    #     if self.best_psnr < avg_psnr:
+    #         self.best_psnr = avg_psnr
+    #         save_checkpoint(epoch, avg_psnr, self.model, self.checkpoint_dir)
+    #         alert.send_notification(f"New best AVG PSNR: Epoch {epoch + 1}  PSNR: {avg_psnr:.2f}")
+
+    #     filename = f"{self.image_dir}/top_image.png"
+    #     Image.fromarray(firVkst_image_grid).save(filename)
+
+    #     # Print Final PSNR value
+    #     print(f'Validation Average PSNR (Full Image Tiling): {avg_psnr:.4f}')
+
+    #     self.model.train()
 
 
     # def visualise_validation_set(self, epoch):

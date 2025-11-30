@@ -33,7 +33,7 @@ class GANDIV2KDataLoader(Dataset):
         In training mode, the size of the random cropping window
     """
 
-    def __init__(self, root_dir_lr, root_dir_hr, transform=None, mode='train', 
+    def __init__(self, root_dir_lr, root_dir_hr, transformLr=None, transformHr=None, mode='train', 
                  batch_size=None, scale = 8, patch_size = 64):
         """
         Initialize the ProgressionDataset.
@@ -55,7 +55,8 @@ class GANDIV2KDataLoader(Dataset):
         patch_size : int
             In training mode, the size of the random cropping window
         """
-        self.transform = transform
+        self.transformLr = transformLr
+        self.transformHr = transformHr
         self.batch_size = batch_size
         self.mode = mode
         self.root_dir_lr = root_dir_lr
@@ -166,8 +167,9 @@ class GANDIV2KDataLoader(Dataset):
         if self.mode == 'train':
             img_lr, img_hr = self._generate_random_crop(img_lr, img_hr)
 
-        if self.transform:
-            img_lr = self.transform(img_lr)
-            img_hr = self.transform(img_hr)
+        if self.transformLr:
+            img_lr = self.transformLr(img_lr)
+        if self.transformHr:
+            img_hr = self.transformHr(img_hr)
 
         return img_lr, img_hr
