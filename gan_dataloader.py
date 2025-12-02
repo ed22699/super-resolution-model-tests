@@ -34,7 +34,7 @@ class GANDIV2KDataLoader(Dataset):
     """
 
     def __init__(self, root_dir_lr, root_dir_hr, transformLr=None, transformHr=None, mode='train', 
-                 batch_size=None, scale = 8, patch_size = 64):
+                 batch_size=None, scale = 8, patch_size = 64, extra_downscale=False):
         """
         Initialize the ProgressionDataset.
 
@@ -63,6 +63,7 @@ class GANDIV2KDataLoader(Dataset):
         self.root_dir_hr = root_dir_hr
         self.scale = scale
         self.patch_size = patch_size
+        self.extra_downscale = extra_downscale
 
         # Iterate through recipe folders and collect ordered step images
         self.lr_image_files = sorted([f for f in os.listdir(
@@ -171,5 +172,8 @@ class GANDIV2KDataLoader(Dataset):
             img_lr = self.transformLr(img_lr)
         if self.transformHr:
             img_hr = self.transformHr(img_hr)
+
+        if self.extra_downscale:
+             lr = F.interpolate( img_lr, scale_factor=0.5, mode="bicubic", align_corners=False)
 
         return img_lr, img_hr

@@ -18,6 +18,7 @@ import torchvision.transforms.functional as TF
 import torchvision.transforms as T
 import random
 from fvcore.nn import FlopCountAnalysis
+from torchvision.transforms import v2
 
 # Alert messages
 import alert
@@ -26,9 +27,12 @@ def main():
     # For GPU (CUDA) or CPU
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    # Load and preprocess the dataset
-    basic_transforms = T.Compose([
-        T.ToTensor(),       # Converts [0, 255] to [0.0, 1.0]
+    basic_transforms_Lr = T.Compose([
+        T.ToTensor(),  
+        v2.GaussianNoise(mean=0.0, sigma=0.5, clip=True)
+    ])
+    basic_transforms_Hr = T.Compose([
+        T.ToTensor(),  
     ])
 
     datasetRoot = "DIV2K"
@@ -39,8 +43,8 @@ def main():
     val_dataset = GANDIV2KDataLoader(
         root_dir_lr=lr_path,
         root_dir_hr=hr_path,
-        transformLr=basic_transforms,
-        transformHr=basic_transforms,
+        transformLr=basic_transforms_Lr,
+        transformHr=basic_transforms_Hr,
         mode="val",
         batch_size=64,
         scale=8,
@@ -55,7 +59,7 @@ def main():
     )
 
 
-    checkpoint = "ckpt_PSNR_22.4838.pth"
+    checkpoint = "ckpt_PSNR_17.7544.pth"
     checkpointPath = "super-resolution-model-tests/gan/training_checkpoints/"+checkpoint
 
     # Define the Binary Cross Entropy loss function
@@ -74,12 +78,16 @@ def main():
 
     visualise_validation_set(val_loader, gan_G, device, scale)
 
-def compute_mse(img1, img2):
-    return F.mse_loss(img1, img2)
+# def compute_mse(img1, img2):
+#     return F.mse_loss(img1, img2)
 
-def compute_psnr(mse):
-    mse_tensor = torch.tensor(mse) 
-    return 10 * torch.log10(1 / mse_tensor)
+# def compute_psnr(mse):
+def compute_psnr(img1, img2, max_val=1.0):
+    mse = F.mse_loss(img1, img2)
+    psnr = 10 * torch.log10((max_val ** 2) / mse)
+    return psnr
+    # mse_tensor = torch.tensor(mse) 
+    # return 10 * torch.log10(1 / mse_tensor)
 
 def compute_flops(model, img, device='cuda'):
     flops = FlopCountAnalysis(model, img)
@@ -157,8 +165,9 @@ def visualise_validation_set(val_loader, gan_G, device, scale):
         sr_img_vis = sr_img_vis[:, :H, :W]
 
         # Calculate PSNR for this image
-        mse_sr = compute_mse(hr_img_vis, sr_img_vis).item()
-        psnr_sr = compute_psnr(mse_sr).item()
+        # mse_sr = compute_mse(hr_img_vis, sr_img_vis).item()
+        # psnr_sr = compute_psnr(mse_sr).item()
+        psnr_sr = compute_psnr(hr_img_vis, sr_img_vis)
         sim_loss = ssim_loss_fn(sr_img_vis.unsqueeze(0), hr_img_vis.unsqueeze(0))
         total_ssim += (1 - sim_loss)
     

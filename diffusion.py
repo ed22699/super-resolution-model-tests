@@ -66,36 +66,6 @@ class SinusoidalPosEmb(nn.Module):
         return emb  # (B, dim)
 
 
-# class ResBlock(nn.Module):
-#     def __init__(self, in_ch, out_ch, time_dim, groups=8):
-#         super().__init__()
-
-#         self.norm1 = nn.GroupNorm(groups, in_ch)
-#         self.act = nn.SiLU()
-#         self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-
-#         # FiLM (scale + shift)
-#         self.time_proj = nn.Sequential(
-#             nn.SiLU(),
-#             nn.Linear(time_dim, out_ch * 2)
-#         )
-
-#         self.norm2 = nn.GroupNorm(groups, out_ch)
-#         self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
-
-#         self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
-
-#     def forward(self, x, t_emb):
-#         h = self.conv1(self.act(self.norm1(x)))
-
-#         # FiLM modulation
-#         scale, shift = self.time_proj(t_emb).chunk(2, dim=1)
-#         h = h * (scale.unsqueeze(-1).unsqueeze(-1) + 1) + shift.unsqueeze(-1).unsqueeze(-1)
-
-#         h = self.conv2(self.act(self.norm2(h)))
-#         return h + self.skip(x)
-
-
 class ResBlock(nn.Module):
     # A simplified Residual Block, often adapted from BigGAN or DDPM
     def __init__(self, in_c, out_c, time_emb_dim, norm_groups=8):

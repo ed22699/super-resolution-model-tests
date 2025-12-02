@@ -32,11 +32,10 @@ def main():
     # Load and preprocess the dataset
     basic_transforms_Lr = T.Compose([
         T.ToTensor(),  
-        v2.GaussianNoise(mean=0.0, sigma=0.1, clip=True)
+        v2.GaussianNoise(mean=0.0, sigma=0.5, clip=True)
     ])
     basic_transforms_Hr = T.Compose([
         T.ToTensor(),  
-        v2.GaussianNoise(mean=0.0, sigma=0.1, clip=True)
     ])
 
     datasetRoot = "DIV2K"

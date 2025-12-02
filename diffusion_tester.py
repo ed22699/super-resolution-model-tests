@@ -24,13 +24,26 @@ import alert
 
 def main():
 
+    # config = {
+    #     'dataset': 'DIV2K',
+    #     'img_size': (640, 640, 3),
+    #     'timestep_embedding_dim': 256,
+    #     'n_layers': 8,
+    #     'hidden_dim': 32,
+    #     'n_timesteps': 400,
+    #     'train_batch_size': 128,
+    #     'inference_batch_size': 64,
+    #     'lr': 1e-4,
+    #     'epochs': 1000,
+    #     'seed': 42,
+    # }
     config = {
         'dataset': 'DIV2K',
         'img_size': (640, 640, 3),
         'timestep_embedding_dim': 256,
         'n_layers': 8,
         'hidden_dim': 32,
-        'n_timesteps': 400,
+        'n_timesteps': 1000,
         'train_batch_size': 128,
         'inference_batch_size': 64,
         'lr': 1e-4,
@@ -74,8 +87,8 @@ def main():
         pin_memory=True,
     )
 
-    checkpoint = "ckpt_PSNR_19.9.pth"
-    checkpointPath = "super-resolution-model-tests/diffusion/training_checkpoint/"+checkpoint
+    checkpoint = "ckpt_PSNR_18.5808.pth"
+    checkpointPath = "super-resolution-model-tests/diffusion/training_checkpoints/"+checkpoint
 
     model = SR3UNet(in_channels = 3,
                      cond_channels = 3,
@@ -84,7 +97,7 @@ def main():
                      ).to(device)
 
     state_dict = torch.load(checkpointPath, map_location=device)
-    model.load_state_dict(state_dict['generator_state_dict'])
+    model.load_state_dict(state_dict['model_state_dict'])
 
     diffusion = Diffusion(model,  
                           timesteps=config['n_timesteps'],
@@ -111,7 +124,7 @@ def compute_flops(model, img, device='cuda'):
     print(f"Approximate FLOPs: {total_flops / 1e9:.2f} GFLOPs")
 
 def visualise_validation_set(val_loader, diffusion, model, device, scale):
-    image_dir = 'super-resolution-model-tests/test_vals/diffusion/generated_image/'
+    image_dir = 'super-resolution-model-tests/test_vals/diffusion/generated_image'
     total_psnr = 0.0
     total_ssim = 0.0
     count = 0
@@ -119,7 +132,7 @@ def visualise_validation_set(val_loader, diffusion, model, device, scale):
     scale_factor = val_loader.dataset.scale
     imageChosenNum = [0, 50, 70]
     ssim_loss_fn = SSIMLoss().to(device)
-    num_images_to_check = 10
+    num_images_to_check = 8
 
     total_start = time.time()
     # Loop over the entire validation loader
@@ -154,7 +167,7 @@ def visualise_validation_set(val_loader, diffusion, model, device, scale):
         total_psnr += psnr_sr
         count += 1
 
-        print(f'Image Build Time: {time.time() - start_time:.2f} sec')
+        print(f'Image Build Time: {time.time() - start_time:.2f} sec, psnr: {psnr_sr}')
 
         # Save image
         if idx in imageChosenNum:

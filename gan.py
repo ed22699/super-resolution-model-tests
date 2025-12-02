@@ -100,7 +100,7 @@ class RRDB(nn.Module):
 # BSRGAN / ESRGAN Generator RRDBNet
 # -----------------------
 class Generator(nn.Module):
-    def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=8, gc=32, scale=8):
+    def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=6, gc=32, scale=8):
         super().__init__()
         RRDB_block_f = functools.partial(RRDB, channels=num_feat, growth=gc)
         self.scale = scale
