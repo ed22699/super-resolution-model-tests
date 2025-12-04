@@ -12,8 +12,8 @@ import matplotlib.pyplot as plt
 import time
 from PIL import Image
 from gan_dataloader import GANDIV2KDataLoader
-from gan import Generator, Discriminator, VGGFeatureExtractor
 from utils.save_checkpoint_diff import save_checkpoint
+from transformer import SwinIR
 import torchvision.transforms.functional as TF
 import torchvision.transforms as T
 import random
@@ -24,15 +24,20 @@ from torchvision.transforms import v2
 import alert
 
 def main():
-    # For GPU (CUDA) or CPU
+    config = {
+        'embed_dim': 64,
+        'upscale': 8,
+    }
+
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
+    # Load and preprocess the dataset
+    basic_transforms_Hr = T.Compose([
+        T.ToTensor(),       # Converts [0, 255] to [0.0, 1.0]
+    ])
     basic_transforms_Lr = T.Compose([
         T.ToTensor(),  
-        v2.GaussianNoise(mean=0.0, sigma=0.05, clip=True)
-    ])
-    basic_transforms_Hr = T.Compose([
-        T.ToTensor(),  
+        v2.GaussianNoise(mean=0.0, sigma=0.2, clip=True)
     ])
 
     datasetRoot = "DIV2K"
@@ -46,7 +51,7 @@ def main():
         transformLr=basic_transforms_Lr,
         transformHr=basic_transforms_Hr,
         mode="val",
-        batch_size=64,
+        batch_size=4,
         scale=8,
     )
 
@@ -59,35 +64,28 @@ def main():
     )
 
 
-    checkpoint = "ckpt_PSNR_21.4008.pth"
-    checkpointPath = "super-resolution-model-tests/gan/training_checkpoints/"+checkpoint
+    model = SwinIR(in_ch = 3,
+                     embed_dim=config['embed_dim'],
+                     upscale = config['upscale'],
+                     ).to(device)
 
-    # Define the Binary Cross Entropy loss function
-    loss_func = nn.BCEWithLogitsLoss()
-    input_dim = 3
-    num_epoch = 500
 
-    gan_G = Generator(input_dim).to(device)
+    checkpoint = "ckpt_PSNR_20.8705.pth"
+    checkpointPath = "super-resolution-model-tests/transformer/training_checkpoints/"+checkpoint
 
     state_dict = torch.load(checkpointPath, map_location=device)
-    gan_G.load_state_dict(state_dict['generator_state_dict'])
+    model.load_state_dict(state_dict['model_state_dict'])
 
     scale = 8
 
-    gan_G.eval()
+    model.eval()
 
-    visualise_validation_set(val_loader, gan_G, device, scale)
+    visualise_validation_set(val_loader, model, device, scale)
 
-# def compute_mse(img1, img2):
-#     return F.mse_loss(img1, img2)
-
-# def compute_psnr(mse):
 def compute_psnr(img1, img2, max_val=1.0):
     mse = F.mse_loss(img1, img2)
     psnr = 10 * torch.log10((max_val ** 2) / mse)
     return psnr
-    # mse_tensor = torch.tensor(mse) 
-    # return 10 * torch.log10(1 / mse_tensor)
 
 def compute_flops(model, img, device='cuda'):
     flops = FlopCountAnalysis(model, img)
@@ -95,18 +93,17 @@ def compute_flops(model, img, device='cuda'):
 
     print(f"Approximate FLOPs: {total_flops / 1e9:.2f} GFLOPs")
 
-def visualise_validation_set(val_loader, gan_G, device, scale):
-    image_dir = 'super-resolution-model-tests/test_vals/GAN/generated_image'
-
+def visualise_validation_set(val_loader, model, device, scale):
+    image_dir = 'super-resolution-model-tests/test_vals/transformer/generated_image'
     total_psnr = 0.0
     total_ssim = 0.0
     count = 0
-    imageChosenNum = [0, 50, 70]
     imageChosen = None
     scale_factor = val_loader.dataset.scale
+    imageChosenNum = [0, 50, 70]
     ssim_loss_fn = SSIMLoss().to(device)
-    total_start = time.time()
 
+    total_start = time.time()
     # Loop over the entire validation loader
     for idx, (lr_img_full, hr_img_full) in enumerate(val_loader):
         
@@ -138,7 +135,7 @@ def visualise_validation_set(val_loader, gan_G, device, scale):
                     lr_patch = lr_img_full[:, :, h_start_actual:h_end, w_start_actual:w_end].to(device)
                 
                     # Generate SR patch
-                    sr_patch = gan_G(lr_patch).squeeze(0) # Keep on device for now
+                    sr_patch = model(lr_patch).squeeze(0) # Keep on device for now
 
                     # Define SR patch coordinates
                     h_start_sr = h_start_actual * scale_factor
@@ -165,34 +162,32 @@ def visualise_validation_set(val_loader, gan_G, device, scale):
         sr_img_vis = sr_img_vis[:, :H, :W]
 
         # Calculate PSNR for this image
-        # mse_sr = compute_mse(hr_img_vis, sr_img_vis).item()
-        # psnr_sr = compute_psnr(mse_sr).item()
         psnr_sr = compute_psnr(hr_img_vis, sr_img_vis)
-        sim_loss = ssim_loss_fn(sr_img_vis.unsqueeze(0), hr_img_vis.unsqueeze(0))
-        total_ssim += (1 - sim_loss)
+        ssim_loss = ssim_loss_fn(sr_img_vis.unsqueeze(0), hr_img_vis.unsqueeze(0))
+        total_ssim += (1- ssim_loss)
     
         # Accumulate PSNR
         total_psnr += psnr_sr
         count += 1
 
         # Grid
-        # Save image
         if idx in imageChosenNum:
             image = (sr_img_vis.permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
             filename = f"{image_dir}/image_{idx}.png"
             Image.fromarray(image).save(filename)
+            
 
     avg_psnr = total_psnr / count if count > 0 else 0.0
     avg_ssim = total_ssim / count
     avg_time = (time.time() - total_start) / count
 
-    alert.send_notification(f"GAN test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
+    alert.send_notification(f"Transformer test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
 
-    compute_flops(gan_G, torch.randn(1, 3, 64, 64).to(device))
+    compute_flops(model, torch.randn(1, 3, 64, 64).to(device))
 
 
     # Print Final PSNR value
-    print(f"GAN test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
+    print(f"Transformer test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
 
 
 def gaussian_window(window_size, sigma, channels):

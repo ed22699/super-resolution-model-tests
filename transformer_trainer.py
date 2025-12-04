@@ -20,6 +20,7 @@ import torchvision.transforms.functional as TF
 import torchvision.transforms as T
 import random
 import argparse
+from torchvision.transforms import v2
 
 # Alert messages
 import alert
@@ -56,15 +57,13 @@ def main(args):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Load and preprocess the dataset
-    basic_transforms = T.Compose([
+    basic_transforms_Lr = T.Compose([
+        T.ToTensor(),  
+        v2.GaussianNoise(mean=0.0, sigma=0.3, clip=True)
+    ])
+    basic_transforms_Hr = T.Compose([
         T.ToTensor(),       # Converts [0, 255] to [0.0, 1.0]
     ])
-    # basic_transforms_aug = T.Compose([
-    #     T.RandomHorizontalFlip(p=0.5),
-    #     T.RandomVerticalFlip(p=0.5),
-    #     T.ToTensor(),  
-    #     T.Lambda(lambda t: (t * 2) - 1)
-    # ])
 
     datasetRoot = "DIV2K"
     lr_path = datasetRoot+"/DIV2K_train_LR_x8"
@@ -73,8 +72,8 @@ def main(args):
     train_dataset = GANDIV2KDataLoader(
         root_dir_lr=lr_path,
         root_dir_hr=hr_path,
-        transformLr=basic_transforms,
-        transformHr=basic_transforms,
+        transformLr=basic_transforms_Lr,
+        transformHr=basic_transforms_Hr,
         mode="train",
         batch_size=16,
         scale=8,
@@ -87,8 +86,8 @@ def main(args):
     val_dataset = GANDIV2KDataLoader(
         root_dir_lr=lr_path,
         root_dir_hr=hr_path,
-        transformLr=basic_transforms,
-        transformHr=basic_transforms,
+        transformLr=basic_transforms_Lr,
+        transformHr=basic_transforms_Hr,
         mode="val",
         batch_size=4,
         scale=8,
@@ -97,7 +96,7 @@ def main(args):
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
-        batch_size=16,
+        batch_size=4,
         pin_memory=True,
         num_workers=cpu_count(),
     )

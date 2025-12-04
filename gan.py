@@ -100,7 +100,7 @@ class RRDB(nn.Module):
 # BSRGAN / ESRGAN Generator RRDBNet
 # -----------------------
 class Generator(nn.Module):
-    def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=6, gc=32, scale=8):
+    def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=11, gc=32, scale=16):
         super().__init__()
         RRDB_block_f = functools.partial(RRDB, channels=num_feat, growth=gc)
         self.scale = scale
@@ -117,14 +117,19 @@ class Generator(nn.Module):
         if self.scale>=4:
             self.upconv2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
 
-        if self.scale == 8:
+        if self.scale >= 8:
             self.upconv3 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
+
+        if self.scale >= 16:
+            self.upconv4 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
 
         # Initialize the upsampling layers
         if hasattr(self, 'upconv2'):
             initialise_weights(self.upconv2, 1.0)
         if hasattr(self, 'upconv3'):
             initialise_weights(self.upconv3, 1.0)
+        if hasattr(self, 'upconv4'):
+            initialise_weights(self.upconv4, 1.0)
 
         self.HRconv = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
 
@@ -148,8 +153,11 @@ class Generator(nn.Module):
         if self.scale>=4:
             fea = self.lrelu(self.upconv2(F.interpolate(fea, scale_factor=2, mode='nearest')))
 
-        if self.scale == 8:
+        if self.scale >= 8:
             fea = self.lrelu(self.upconv3(F.interpolate(fea, scale_factor=2, mode='nearest')))
+
+        if self.scale == 16:
+            fea = self.lrelu(self.upconv4(F.interpolate(fea, scale_factor=2, mode='nearest')))
 
 
         out = self.conv_last(self.lrelu(self.HRconv(fea)))

@@ -18,31 +18,18 @@ import torchvision.transforms.functional as TF
 import torchvision.transforms as T
 import random
 from fvcore.nn import FlopCountAnalysis
+from torchvision.transforms import v2
 
 # Alert messages
 import alert
 
 def main():
-
-    # config = {
-    #     'dataset': 'DIV2K',
-    #     'img_size': (640, 640, 3),
-    #     'timestep_embedding_dim': 256,
-    #     'n_layers': 8,
-    #     'hidden_dim': 32,
-    #     'n_timesteps': 400,
-    #     'train_batch_size': 128,
-    #     'inference_batch_size': 64,
-    #     'lr': 1e-4,
-    #     'epochs': 1000,
-    #     'seed': 42,
-    # }
     config = {
         'dataset': 'DIV2K',
         'img_size': (640, 640, 3),
         'timestep_embedding_dim': 256,
         'n_layers': 8,
-        'hidden_dim': 32,
+        'hidden_dim': 64,
         'n_timesteps': 1000,
         'train_batch_size': 128,
         'inference_batch_size': 64,
@@ -58,9 +45,13 @@ def main():
     # For GPU (CUDA) or CPU
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    # Load and preprocess the dataset
-    basic_transforms = T.Compose([
-        T.ToTensor(),       # Converts [0, 255] to [0.0, 1.0]
+    basic_transforms_Hr = T.Compose([
+        T.ToTensor(),      
+        T.Lambda(lambda t: (t * 2) - 1)
+    ])
+    basic_transforms_Lr = T.Compose([
+        T.ToTensor(),  
+        v2.GaussianNoise(mean=0.0, sigma=0.3, clip=True),
         T.Lambda(lambda t: (t * 2) - 1)
     ])
 
@@ -72,8 +63,8 @@ def main():
     val_dataset = GANDIV2KDataLoader(
         root_dir_lr=lr_path,
         root_dir_hr=hr_path,
-        transformLr=basic_transforms,
-        transformHr=basic_transforms,
+        transformLr=basic_transforms_Hr,
+        transformHr=basic_transforms_Hr,
         mode="val",
         batch_size=4,
         scale=8,
@@ -87,8 +78,8 @@ def main():
         pin_memory=True,
     )
 
-    checkpoint = "ckpt_PSNR_18.5808.pth"
-    checkpointPath = "super-resolution-model-tests/diffusion/training_checkpoints/"+checkpoint
+    checkpoint = "ckpt_PSNR_13.2314.pth"
+    checkpointPath = "super-resolution-model-tests/diffusion/n3/training_checkpoints/"+checkpoint
 
     model = SR3UNet(in_channels = 3,
                      cond_channels = 3,
@@ -110,26 +101,26 @@ def main():
 
     visualise_validation_set(val_loader, diffusion, model, device, scale)
 
-def compute_mse(img1, img2):
-    return F.mse_loss(img1, img2)
+def compute_psnr(img1, img2, max_val=1.0):
+    mse = F.mse_loss(img1, img2)
+    psnr = 10 * torch.log10((max_val ** 2) / mse)
+    return psnr
 
-def compute_psnr(mse):
-    mse_tensor = torch.tensor(mse) 
-    return 10 * torch.log10(1 / mse_tensor)
 
-def compute_flops(model, img, device='cuda'):
-    flops = FlopCountAnalysis(model, img)
+def compute_flops(model, inputs, device='cuda'):
+    flops = FlopCountAnalysis(model, inputs)
     total_flops = flops.total()
 
     print(f"Approximate FLOPs: {total_flops / 1e9:.2f} GFLOPs")
 
 def visualise_validation_set(val_loader, diffusion, model, device, scale):
-    image_dir = 'super-resolution-model-tests/test_vals/diffusion/generated_image'
+    image_dir = 'super-resolution-model-tests/test_vals/diffusion/s1/generated_image'
     total_psnr = 0.0
     total_ssim = 0.0
     count = 0
     imageChosen = None
     scale_factor = val_loader.dataset.scale
+    imagesToCheck = [0,1,2,8,50,70]
     imageChosenNum = [0, 50, 70]
     ssim_loss_fn = SSIMLoss().to(device)
     num_images_to_check = 8
@@ -137,7 +128,7 @@ def visualise_validation_set(val_loader, diffusion, model, device, scale):
     total_start = time.time()
     # Loop over the entire validation loader
     for idx, (lr_img_full, hr_img_full) in enumerate(val_loader):
-        if (idx > num_images_to_check) and (idx not in imageChosenNum):
+        if idx not in imagesToCheck:
             continue
         start_time = time.time()
         lr_img_full = lr_img_full.to(device)
@@ -158,8 +149,7 @@ def visualise_validation_set(val_loader, diffusion, model, device, scale):
         sr_img_vis = sr_img_vis[:, :H, :W]
 
         # Calculate PSNR for this image
-        mse_sr = compute_mse(hr_img_vis, sr_img_vis).item()
-        psnr_sr = compute_psnr(mse_sr).item()
+        psnr_sr = compute_psnr(hr_img_vis, sr_img_vis)
         sim_loss = ssim_loss_fn(sr_img_vis.unsqueeze(0), hr_img_vis.unsqueeze(0))
         total_ssim += (1 - sim_loss)
     
@@ -181,7 +171,12 @@ def visualise_validation_set(val_loader, diffusion, model, device, scale):
 
     alert.send_notification(f"Diffusion test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
 
-    compute_flops(model, torch.randn(1, 3, 64, 64).to(device))
+    dummy_x = torch.randn(1, 3, 64, 64).to(device)
+    dummy_cond = torch.randn(1, 3, 64, 64).to(device)
+    dummy_t = torch.tensor([500]).to(device)        
+
+    # Pass them as a tuple
+    compute_flops(model, (dummy_x, dummy_cond, dummy_t))
 
 
     # Print Final PSNR value

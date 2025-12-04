@@ -86,6 +86,21 @@ class WindowAttention(nn.Module):
         x = self.proj(x)
         return x
 
+class ShallowCNN(nn.Module):
+    def __init__(self, in_ch=3, dim=64):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv2d(in_ch, dim, 3, padding=1),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(dim, dim, 3, padding=1),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(dim, dim, 3, padding=1)
+        )
+
+    def forward(self, x):
+        return self.layers(x)
 
 class SwinBlock(nn.Module):
     def __init__(self, dim, num_heads, window_size=8, mlp_ratio=4.0):
@@ -204,7 +219,8 @@ class SwinIR(nn.Module):
         self.upscale = upscale
 
         # shallow feature extractor
-        self.patch_embed = PatchEmbed(in_ch, embed_dim)
+        self.shallow_cnn = ShallowCNN(in_ch, embed_dim)
+        self.patch_embed = PatchEmbed(in_ch=embed_dim, embed_dim=embed_dim, patch_size=1)
         self.patch_unembed = PatchUnEmbed(in_ch, embed_dim)
 
         # deep Swin Transformer layers (RSTBs)
@@ -225,6 +241,7 @@ class SwinIR(nn.Module):
         B, C, H, W = x.shape
 
         # shallow features
+        x = self.shallow_cnn(x)
         feat = self.patch_embed(x)
         feat = feat.flatten(2).transpose(1, 2) # (B, L, C)
 

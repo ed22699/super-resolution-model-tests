@@ -20,6 +20,7 @@ import torchvision.transforms.functional as TF
 import torchvision.transforms as T
 import random
 import argparse
+from torchvision.transforms import v2
 
 # Alert messages
 import alert
@@ -59,8 +60,13 @@ def main(args):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Load and preprocess the dataset
-    basic_transforms = T.Compose([
+    basic_transforms_Hr = T.Compose([
         T.ToTensor(),      
+        T.Lambda(lambda t: (t * 2) - 1)
+    ])
+    basic_transforms_Lr = T.Compose([
+        T.ToTensor(),  
+        v2.GaussianNoise(mean=0.0, sigma=0.3, clip=True),
         T.Lambda(lambda t: (t * 2) - 1)
     ])
 
@@ -71,8 +77,8 @@ def main(args):
     train_dataset = GANDIV2KDataLoader(
         root_dir_lr=lr_path,
         root_dir_hr=hr_path,
-        transformLr=basic_transforms,
-        transformHr=basic_transforms,
+        transformLr=basic_transforms_Hr,
+        transformHr=basic_transforms_Hr,
         mode="train",
         batch_size=16,
         scale=8,
@@ -86,8 +92,8 @@ def main(args):
     val_dataset = GANDIV2KDataLoader(
         root_dir_lr=lr_path,
         root_dir_hr=hr_path,
-        transformLr=basic_transforms,
-        transformHr=basic_transforms,
+        transformLr=basic_transforms_Lr,
+        transformHr=basic_transforms_Hr,
         mode="val",
         batch_size=4,
         scale=8,
@@ -117,11 +123,11 @@ def main(args):
                      time_dim = args.timestep_embedding_dim
                      ).to(device)
 
-    checkpoint = "ckpt_PSNR_15.5918.pth"
-    checkpointPath = "super-resolution-model-tests/diffusion/training_checkpoints/"+checkpoint
-    state_dict = torch.load(checkpointPath, map_location=device)
-    model.load_state_dict(state_dict['model_state_dict'])
-    startEpoch = state_dict['epoch']
+    # checkpoint = "ckpt_PSNR_19.1473.pth"
+    # checkpointPath = "super-resolution-model-tests/diffusion/training_checkpoints/"+checkpoint
+    # state_dict = torch.load(checkpointPath, map_location=device)
+    # model.load_state_dict(state_dict['model_state_dict'])
+    # startEpoch = state_dict['epoch']
 
     diffusion = Diffusion(model,  
                           timesteps=args.n_timesteps,
@@ -129,7 +135,7 @@ def main(args):
                           )
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    trainer = Trainer(loss_func, model, diffusion, train_loader, val_loader, optimizer, device, startEpoch)
+    trainer = Trainer(loss_func, model, diffusion, train_loader, val_loader, optimizer, device)
     trainer.loopEpochs(args.epochs)
 
     alert.send_notification(f"Training finished for visual AI")
@@ -149,7 +155,7 @@ class Trainer:
         self.startEpoch = startEpoch
 
         # Directories
-        self.checkpoint_dir = 'super-resolution-model-tests/diffusion/training_checkpoints'
+        self.checkpoint_dir = 'super-resolution-model-tests/diffusion/n3/training_checkpoints'
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.image_dir = 'super-resolution-model-tests/diffusion/generated_image/'
         os.makedirs(self.image_dir, exist_ok=True)
