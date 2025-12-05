@@ -11,7 +11,7 @@ from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 import time
 from PIL import Image
-from gan_dataloader import GANDIV2KDataLoader
+from dataloader import GANDIV2KDataLoader
 from diffusion import Diffusion,  SR3UNet
 from utils.save_checkpoint_diff import save_checkpoint
 import torchvision.transforms.functional as TF
@@ -19,24 +19,23 @@ import torchvision.transforms as T
 import random
 from fvcore.nn import FlopCountAnalysis
 from torchvision.transforms import v2
+import lpips
 
 # Alert messages
-import alert
+# import alert
 
 def main():
     config = {
-        'dataset': 'DIV2K',
-        'img_size': (640, 640, 3),
         'timestep_embedding_dim': 256,
         'n_layers': 8,
         'hidden_dim': 64,
         'n_timesteps': 1000,
-        'train_batch_size': 128,
-        'inference_batch_size': 64,
         'lr': 1e-4,
         'epochs': 1000,
         'seed': 42,
     }
+
+    scale = 8
 
     hidden_dims = [config['hidden_dim'] for _ in range(config['n_layers'])]
     torch.manual_seed(config['seed'])
@@ -51,7 +50,6 @@ def main():
     ])
     basic_transforms_Lr = T.Compose([
         T.ToTensor(),  
-        v2.GaussianNoise(mean=0.0, sigma=0.3, clip=True),
         T.Lambda(lambda t: (t * 2) - 1)
     ])
 
@@ -67,7 +65,7 @@ def main():
         transformHr=basic_transforms_Hr,
         mode="val",
         batch_size=4,
-        scale=8,
+        scale=scale,
     )
 
     val_loader = torch.utils.data.DataLoader(
@@ -78,12 +76,15 @@ def main():
         pin_memory=True,
     )
 
-    checkpoint = "ckpt_PSNR_13.2314.pth"
-    checkpointPath = "super-resolution-model-tests/diffusion/n3/training_checkpoints/"+checkpoint
+    # Alter checkpoint to the top value
+    checkpoint = "ckpt_PSNR_14.1278.pth"
+    checkpointPath = "super-resolution-model-tests/diffusion/training_checkpoints/"+checkpoint
 
+    # Create Model
     model = SR3UNet(in_channels = 3,
                      cond_channels = 3,
                      base_channels = config['hidden_dim'],
+                     channel_mults=[1,2,4,8],
                      time_dim = config['timestep_embedding_dim']
                      ).to(device)
 
@@ -94,8 +95,6 @@ def main():
                           timesteps=config['n_timesteps'],
                           device=device
                           )
-
-    scale = 8
 
     model.eval()
 
@@ -114,23 +113,29 @@ def compute_flops(model, inputs, device='cuda'):
     print(f"Approximate FLOPs: {total_flops / 1e9:.2f} GFLOPs")
 
 def visualise_validation_set(val_loader, diffusion, model, device, scale):
-    image_dir = 'super-resolution-model-tests/test_vals/diffusion/s1/generated_image'
+    image_dir = 'super-resolution-model-tests/test_vals/diffusion/generated_image'
     total_psnr = 0.0
     total_ssim = 0.0
+    total_lpips = 0.0
     count = 0
+
     imageChosen = None
     scale_factor = val_loader.dataset.scale
-    imagesToCheck = [0,1,2,8,50,70]
     imageChosenNum = [0, 50, 70]
+
+    # SSIM setup
     ssim_loss_fn = SSIMLoss().to(device)
-    num_images_to_check = 8
+    
+    # LPIPS setup
+    lpips_loss_fn = lpips.LPIPS(net='alex').to(device)
+    norm = T.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
 
     total_start = time.time()
+
     # Loop over the entire validation loader
     for idx, (lr_img_full, hr_img_full) in enumerate(val_loader):
-        if idx not in imagesToCheck:
-            continue
         start_time = time.time()
+
         lr_img_full = lr_img_full.to(device)
         hr_img_full = hr_img_full.to(device)
         
@@ -148,13 +153,21 @@ def visualise_validation_set(val_loader, diffusion, model, device, scale):
         hr_img_vis = hr_img_vis[:, :H, :W]
         sr_img_vis = sr_img_vis[:, :H, :W]
 
-        # Calculate PSNR for this image
+        # Calculate Metrics
         psnr_sr = compute_psnr(hr_img_vis, sr_img_vis)
         sim_loss = ssim_loss_fn(sr_img_vis.unsqueeze(0), hr_img_vis.unsqueeze(0))
         total_ssim += (1 - sim_loss)
+
+        ref_input = norm(hr_img) 
+        pred_input = norm(sr_img)
+        
+        with torch.no_grad():
+            lpips_score = lpips_loss_fn(pred_input, ref_input)
+        
     
         # Accumulate PSNR
         total_psnr += psnr_sr
+        total_lpips += lpips_score.item()
         count += 1
 
         print(f'Image Build Time: {time.time() - start_time:.2f} sec, psnr: {psnr_sr}')
@@ -167,20 +180,21 @@ def visualise_validation_set(val_loader, diffusion, model, device, scale):
 
     avg_psnr = total_psnr / count if count > 0 else 0.0
     avg_ssim = total_ssim / count
+    avg_lpips = total_lpips / count if count > 0 else 0.0
     avg_time = (time.time() - total_start) / count
 
-    alert.send_notification(f"Diffusion test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
+    # alert.send_notification(f"Diffusion test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg LPIPS {avg_lpips}, Avg Time {avg_time:.2f} sec")
 
     dummy_x = torch.randn(1, 3, 64, 64).to(device)
     dummy_cond = torch.randn(1, 3, 64, 64).to(device)
     dummy_t = torch.tensor([500]).to(device)        
 
-    # Pass them as a tuple
+    # Calculate FLOPs
     compute_flops(model, (dummy_x, dummy_cond, dummy_t))
 
 
     # Print Final PSNR value
-    print(f"Diffusion test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
+    print(f"Diffusion test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg LPIPs: {avg_lpips}, Avg Time {avg_time:.2f} sec")
 
 
 def gaussian_window(window_size, sigma, channels):
@@ -188,11 +202,9 @@ def gaussian_window(window_size, sigma, channels):
     g = torch.exp(-(coords**2) / (2 * sigma * sigma))
     g = g / g.sum()
 
-    # 2D gaussian
     g2d = g[:, None] * g[None, :]
     g2d = g2d / g2d.sum()
 
-    # shape: (C, 1, k, k)
     window = g2d.expand(channels, 1, window_size, window_size).contiguous()
     return window
 
@@ -202,12 +214,11 @@ class SSIMLoss(nn.Module):
         super().__init__()
         self.window_size = window_size
         self.sigma = sigma
-        self.register_buffer("window", None)  # will initialize later
+        self.register_buffer("window", None) 
 
     def forward(self, img1, img2):
         B, C, H, W = img1.shape
 
-        # Create gaussian window on first use or when channels change
         if self.window is None or self.window.size(0) != C:
             window = gaussian_window(self.window_size, self.sigma, C)
             self.window = window.to(img1.device).to(img1.dtype)
@@ -227,7 +238,7 @@ class SSIMLoss(nn.Module):
 
         ssim = ssim_map.mean()
 
-        return 1 - ssim     # loss
+        return 1 - ssim
 
 
 

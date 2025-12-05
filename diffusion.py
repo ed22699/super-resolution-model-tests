@@ -49,31 +49,14 @@ class SinusoidalPosEmb(nn.Module):
         emb = torch.cat([emb.sin(), emb.cos()], dim=-1)
         return emb
 
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        # x: (B,) of integers/longs or floats
-        device = x.device
-        x = x.float()  # IMPORTANT: ensure float
-        half_dim = self.dim // 2
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, half_dim, device=device).float() / half_dim))
-        # shape: (half_dim,)
-        emb = x[:, None] * inv_freq[None, :]  # (B, half_dim)
-        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)
-        return emb  # (B, dim)
-
 
 class ResBlock(nn.Module):
-    # A simplified Residual Block, often adapted from BigGAN or DDPM
     def __init__(self, in_c, out_c, time_emb_dim, norm_groups=8):
         super().__init__()
-        # Time embedding (FiLM modulation)
+        # Time embedding
         self.mlp = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(time_emb_dim, 2 * out_c) # Output two vectors for scale/shift
+            nn.Linear(time_emb_dim, 2 * out_c)
         )
         # Block layers
         self.block = nn.Sequential(
@@ -87,7 +70,7 @@ class ResBlock(nn.Module):
         self.res_conv = nn.Conv2d(in_c, out_c, kernel_size=1) if in_c != out_c else nn.Identity()
 
     def forward(self, x, time_emb):
-        scale, shift = self.mlp(time_emb).chunk(2, dim=1) # Split into two for FiLM
+        scale, shift = self.mlp(time_emb).chunk(2, dim=1)
         
         h = self.block(x)
         # FiLM (Feature-wise Linear Modulation)
@@ -98,7 +81,6 @@ class ResBlock(nn.Module):
 class Downsample(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        # Kernel 3, Stride 2, Padding 1 = Halves dimension (H/2, W/2)
         self.conv = nn.Conv2d(dim, dim, kernel_size=3, stride=2, padding=1)
 
     def forward(self, x):
@@ -113,9 +95,7 @@ class Upsample(nn.Module):
     def forward(self, x):
         return self.conv(self.up(x))
 
-# -----------------------------
-# SR3 U-Net
-# -----------------------------
+
 class SR3UNet(nn.Module):
     def __init__(self, in_channels=3, cond_channels=3, base_channels=64, channel_mults=[1,2,4, 8], time_dim=256):
         super().__init__()
@@ -133,13 +113,10 @@ class SR3UNet(nn.Module):
         # Input convolution
         self.init_conv = nn.Conv2d(in_channels + cond_channels, base_channels, 3, padding=1)
         
-        # -----------------------------
-        # Encoder (Down)
-        # -----------------------------
+        # Encoder
         self.downs = nn.ModuleList()
         in_ch = base_channels
         
-        # We need to store output channels to know what size skips will be
         self.skip_channels = [] 
         
         for i, mult in enumerate(channel_mults):
@@ -147,38 +124,29 @@ class SR3UNet(nn.Module):
             
             # ResBlock
             self.downs.append(ResBlock(in_ch, out_ch, time_dim))
-            self.skip_channels.append(out_ch) # Save for decoder
+            self.skip_channels.append(out_ch)
             
-            # Downsample (except last)
+            # Downsample
             if i != len(channel_mults) - 1:
                 self.downs.append(Downsample(out_ch))
-                # Downsample doesn't change channels
                 
             in_ch = out_ch
 
-        # -----------------------------
-        # Mid Block
-        # -----------------------------
+        # Bottleneck
         self.mid_block1 = ResBlock(in_ch, in_ch, time_dim)
         self.mid_block2 = ResBlock(in_ch, in_ch, time_dim)
         
-        # -----------------------------
-        # Decoder (Up)
-        # -----------------------------
+        # Decoder
         self.ups = nn.ModuleList()
         
-        # Iterate in reverse: [4, 2, 1]
         for i, mult in enumerate(reversed(channel_mults)):
             out_ch = base_channels * mult
-            
-            # Retrieve the skip channel size corresponding to this level
-            # We pop from the end of our recorded list
             skip_ch = self.skip_channels.pop()
             
-            # ResBlock Input = Current Up Features + Skip Features
+            # ResBlock
             self.ups.append(ResBlock(in_ch + skip_ch, out_ch, time_dim))
             
-            # Upsample (except last)
+            # Upsample
             if i != len(channel_mults) - 1:
                 self.ups.append(Upsample(out_ch))
                 
@@ -188,7 +156,7 @@ class SR3UNet(nn.Module):
         self.final_conv = nn.Conv2d(in_ch, 3, 1)
 
     def forward(self, x_noisy, cond, t):
-        cond_up = F.interpolate(cond, size=x_noisy.shape[-2:], mode="bilinear", align_corners=False)
+        cond_up = F.interpolate(cond, size=x_noisy.shape[-2:], mode="bicubic", align_corners=False)
         x = torch.cat([x_noisy, cond_up], dim=1)
         
         t_emb = self.time_mlp(t)
@@ -201,11 +169,11 @@ class SR3UNet(nn.Module):
         for layer in self.downs:
             if isinstance(layer, ResBlock):
                 h = layer(h, t_emb)
-                skips.append(h) # Save skip
+                skips.append(h)
             else:
-                h = layer(h) # Downsample
+                h = layer(h)
         
-        # Middle
+        # Bottleneck
         h = self.mid_block1(h, t_emb)
         h = F.silu(h)
         h = self.mid_block2(h, t_emb)
@@ -213,17 +181,15 @@ class SR3UNet(nn.Module):
         # Decoder
         for layer in self.ups:
             if isinstance(layer, ResBlock):
-                # We expect the list of skips to align with our layers
                 skip = skips.pop() 
                 
-                # Check shapes to debug (Optional)
-                # if h.shape[2:] != skip.shape[2:]:
-                #     h = F.interpolate(h, size=skip.shape[2:], mode='nearest')
+                if h.shape[2:] != skip.shape[2:]:
+                    h = F.interpolate(h, size=skip.shape[2:], mode='nearest')
                 
                 h = torch.cat([h, skip], dim=1)
                 h = layer(h, t_emb)
             else:
-                h = layer(h) # Upsample
+                h = layer(h)
         
         return self.final_conv(h)
 
@@ -248,7 +214,6 @@ class Diffusion:
         betas = torch.clip(betas, 0.0001, 0.02)
         return betas
 
-    # q(x_t | x_0)  (forward) = add noise
     def q_sample(self, x0, t, noise=None):
         if noise is None:
             noise = torch.randn_like(x0)
@@ -285,15 +250,9 @@ class Diffusion:
 
             if i > 0:
                 noise = torch.randn_like(x)
-                
-                # --- SIMPLIFIED VARIANCE (Fixes Grain) ---
-                # Old way: complex formula using alpha_prev
-                # New way: standard DDPM sigma
                 sigma = beta.sqrt()
-                
                 x = mean + sigma * noise
             else:
                 x = mean
                 
-        # Return [-1, 1] output
         return x.clamp(-1., 1.)

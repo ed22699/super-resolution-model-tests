@@ -1,3 +1,6 @@
+# Credit to Zhang et al. This code is an adaptation of the original BSRGAN 
+# Source of original: https://github.com/cszn/BSRGAN
+
 import torch
 from torch import nn
 import functools
@@ -34,7 +37,7 @@ def initialise_weights(net_l, scale=1):
         for m in net.modules():
             if isinstance(m, nn.Conv2d):
                 init.kaiming_normal_(m.weight, a=0, mode='fan_in')
-                m.weight.data *= scale  # for residual block
+                m.weight.data *= scale 
                 if m.bias is not None:
                     m.bias.data.zero_()
             elif isinstance(m, nn.Linear):
@@ -52,9 +55,6 @@ def make_layer(block, n_layers):
         layers.append(block())
     return nn.Sequential(*layers)
 
-# -----------------------
-# Residual Dense Block
-# -----------------------
 class DenseBlock(nn.Module):
     def __init__(self, channels=64, growth=32, bias=True):
         super().__init__()
@@ -66,7 +66,6 @@ class DenseBlock(nn.Module):
 
         self.lrelu = nn.LeakyReLU(0.2, inplace=True)
 
-        # initialisation
         initialise_weights([self.conv1, self.conv2, self.conv3, self.conv4, self.conv5], 0.1)
 
     def forward(self, x):
@@ -79,9 +78,6 @@ class DenseBlock(nn.Module):
         return f5 * 0.2 + x
 
 
-# -----------------------
-# RRDB Block (Residual in Residual Dense Block)
-# -----------------------
 class RRDB(nn.Module):
     def __init__(self, channels, growth=32):
         super().__init__()
@@ -96,11 +92,8 @@ class RRDB(nn.Module):
         return x + 0.2 * out
 
 
-# -----------------------
-# BSRGAN / ESRGAN Generator RRDBNet
-# -----------------------
 class Generator(nn.Module):
-    def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=11, gc=32, scale=16):
+    def __init__(self, in_ch=3, out_ch=3, num_feat=64, num_blocks=16, gc=32, scale=16):
         super().__init__()
         RRDB_block_f = functools.partial(RRDB, channels=num_feat, growth=gc)
         self.scale = scale
@@ -140,9 +133,9 @@ class Generator(nn.Module):
 
         nn.init.normal_(self.conv_last.weight, mean=0, std=0.001)
         nn.init.constant_(self.conv_last.bias, 0.5)
-        # initialise_weights(self.conv_last, 1.0) 
 
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
 
     def forward(self, x):
         fea = self.conv_first(x)
@@ -163,6 +156,7 @@ class Generator(nn.Module):
         out = self.conv_last(self.lrelu(self.HRconv(fea)))
 
         return out
+
 
 class Discriminator(nn.Module):
     def __init__(self, in_channels=3, ndf=64, n_layers=5):

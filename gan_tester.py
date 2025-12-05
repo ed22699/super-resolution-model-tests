@@ -11,7 +11,7 @@ from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 import time
 from PIL import Image
-from gan_dataloader import GANDIV2KDataLoader
+from dataloader import GANDIV2KDataLoader
 from gan import Generator, Discriminator, VGGFeatureExtractor
 from utils.save_checkpoint_diff import save_checkpoint
 import torchvision.transforms.functional as TF
@@ -19,9 +19,10 @@ import torchvision.transforms as T
 import random
 from fvcore.nn import FlopCountAnalysis
 from torchvision.transforms import v2
+import lpips
 
 # Alert messages
-import alert
+# import alert
 
 def main():
     # For GPU (CUDA) or CPU
@@ -29,12 +30,14 @@ def main():
 
     basic_transforms_Lr = T.Compose([
         T.ToTensor(),  
-        v2.GaussianNoise(mean=0.0, sigma=0.05, clip=True)
     ])
     basic_transforms_Hr = T.Compose([
         T.ToTensor(),  
     ])
 
+    scale = 8
+
+    # Load dataset
     datasetRoot = "DIV2K"
 
     lr_path = datasetRoot+"/DIV2K_valid_LR_x8"
@@ -47,7 +50,7 @@ def main():
         transformHr=basic_transforms_Hr,
         mode="val",
         batch_size=64,
-        scale=8,
+        scale=scale,
     )
 
     val_loader = torch.utils.data.DataLoader(
@@ -59,35 +62,31 @@ def main():
     )
 
 
-    checkpoint = "ckpt_PSNR_21.4008.pth"
+    # Top checkpoint
+    checkpoint = "ckpt_PSNR_18.3250.pth"
     checkpointPath = "super-resolution-model-tests/gan/training_checkpoints/"+checkpoint
 
-    # Define the Binary Cross Entropy loss function
     loss_func = nn.BCEWithLogitsLoss()
+
     input_dim = 3
     num_epoch = 500
 
+    # Load model
     gan_G = Generator(input_dim).to(device)
 
     state_dict = torch.load(checkpointPath, map_location=device)
     gan_G.load_state_dict(state_dict['generator_state_dict'])
 
-    scale = 8
 
     gan_G.eval()
 
     visualise_validation_set(val_loader, gan_G, device, scale)
 
-# def compute_mse(img1, img2):
-#     return F.mse_loss(img1, img2)
 
-# def compute_psnr(mse):
 def compute_psnr(img1, img2, max_val=1.0):
     mse = F.mse_loss(img1, img2)
     psnr = 10 * torch.log10((max_val ** 2) / mse)
     return psnr
-    # mse_tensor = torch.tensor(mse) 
-    # return 10 * torch.log10(1 / mse_tensor)
 
 def compute_flops(model, img, device='cuda'):
     flops = FlopCountAnalysis(model, img)
@@ -100,11 +99,19 @@ def visualise_validation_set(val_loader, gan_G, device, scale):
 
     total_psnr = 0.0
     total_ssim = 0.0
+    total_lpips = 0.0
     count = 0
     imageChosenNum = [0, 50, 70]
     imageChosen = None
     scale_factor = val_loader.dataset.scale
+
+    # SSIM setup
     ssim_loss_fn = SSIMLoss().to(device)
+
+    # LPIPS setup
+    lpips_loss_fn = lpips.LPIPS(net='alex').to(device)
+    norm = T.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+
     total_start = time.time()
 
     # Loop over the entire validation loader
@@ -113,24 +120,22 @@ def visualise_validation_set(val_loader, gan_G, device, scale):
         _, _, H_lr, W_lr = lr_img_full.shape
         
         TILE_SIZE = 128
-        OVERLAP = 32  # Define overlap amount (e.g., 25% of tile size)
+        OVERLAP = 32 
         STRIDE = TILE_SIZE - OVERLAP
 
-        # Create tensors to store the stitched image and a counter
         H_sr = H_lr * scale_factor
         W_sr = W_lr * scale_factor
         sr_img_stitched = torch.zeros(hr_img_full.shape[1], H_sr, W_sr, dtype=hr_img_full.dtype).to(device)
         stitch_counter = torch.zeros(hr_img_full.shape[1], H_sr, W_sr, dtype=hr_img_full.dtype).to(device)
 
         with torch.no_grad():
-            # Loop with STRIDE instead of TILE_SIZE
             for h_start in range(0, H_lr, STRIDE):
                 for w_start in range(0, W_lr, STRIDE):
                     # Define LR patch coordinates
                     h_end = min(h_start + TILE_SIZE, H_lr)
                     w_end = min(w_start + TILE_SIZE, W_lr)
                     
-                    # Adjust start if we are at the end to ensure full tile size
+                    # Adjust start
                     h_start_actual = max(0, h_end - TILE_SIZE)
                     w_start_actual = max(0, w_end - TILE_SIZE)
 
@@ -146,14 +151,11 @@ def visualise_validation_set(val_loader, gan_G, device, scale):
                     w_start_sr = w_start_actual * scale_factor
                     w_end_sr = w_end * scale_factor
 
-                    # Add patch to stiched image and increment counter
                     sr_img_stitched[:, h_start_sr:h_end_sr, w_start_sr:w_end_sr] += sr_patch
                     stitch_counter[:, h_start_sr:h_end_sr, w_start_sr:w_end_sr] += 1.0
 
-        # Divide by counter to average overlapping regions
         sr_img_stitched /= stitch_counter
 
-        # Move back to CPU for final processing
         sr_img_stitched = sr_img_stitched.cpu()
         hr_img_vis = hr_img_full.squeeze(0).clamp(0, 1)
         sr_img_vis = sr_img_stitched.clamp(0, 1)
@@ -164,18 +166,22 @@ def visualise_validation_set(val_loader, gan_G, device, scale):
         hr_img_vis = hr_img_vis[:, :H, :W]
         sr_img_vis = sr_img_vis[:, :H, :W]
 
-        # Calculate PSNR for this image
-        # mse_sr = compute_mse(hr_img_vis, sr_img_vis).item()
-        # psnr_sr = compute_psnr(mse_sr).item()
+        # Calculate Metrics
         psnr_sr = compute_psnr(hr_img_vis, sr_img_vis)
         sim_loss = ssim_loss_fn(sr_img_vis.unsqueeze(0), hr_img_vis.unsqueeze(0))
         total_ssim += (1 - sim_loss)
+
+        ref_input = norm(hr_img) 
+        pred_input = norm(sr_img)
+        
+        with torch.no_grad():
+            lpips_score = lpips_loss_fn(pred_input, ref_input)
     
         # Accumulate PSNR
         total_psnr += psnr_sr
+        total_lpips += lpips_score.item()
         count += 1
 
-        # Grid
         # Save image
         if idx in imageChosenNum:
             image = (sr_img_vis.permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
@@ -184,15 +190,16 @@ def visualise_validation_set(val_loader, gan_G, device, scale):
 
     avg_psnr = total_psnr / count if count > 0 else 0.0
     avg_ssim = total_ssim / count
+    avg_lpips = total_lpips / count if count > 0 else 0.0
     avg_time = (time.time() - total_start) / count
 
-    alert.send_notification(f"GAN test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
+    # alert.send_notification(f"GAN test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
 
     compute_flops(gan_G, torch.randn(1, 3, 64, 64).to(device))
 
 
     # Print Final PSNR value
-    print(f"GAN test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
+    print(f"GAN test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg LPIPS {avg_lpips}, Avg Time {avg_time:.2f} sec")
 
 
 def gaussian_window(window_size, sigma, channels):
@@ -200,11 +207,9 @@ def gaussian_window(window_size, sigma, channels):
     g = torch.exp(-(coords**2) / (2 * sigma * sigma))
     g = g / g.sum()
 
-    # 2D gaussian
     g2d = g[:, None] * g[None, :]
     g2d = g2d / g2d.sum()
 
-    # shape: (C, 1, k, k)
     window = g2d.expand(channels, 1, window_size, window_size).contiguous()
     return window
 
@@ -214,12 +219,11 @@ class SSIMLoss(nn.Module):
         super().__init__()
         self.window_size = window_size
         self.sigma = sigma
-        self.register_buffer("window", None)  # will initialize later
+        self.register_buffer("window", None)
 
     def forward(self, img1, img2):
         B, C, H, W = img1.shape
 
-        # Create gaussian window on first use or when channels change
         if self.window is None or self.window.size(0) != C:
             window = gaussian_window(self.window_size, self.sigma, C)
             self.window = window.to(img1.device).to(img1.dtype)
@@ -239,7 +243,7 @@ class SSIMLoss(nn.Module):
 
         ssim = ssim_map.mean()
 
-        return 1 - ssim     # loss
+        return 1 - ssim
 
 
 

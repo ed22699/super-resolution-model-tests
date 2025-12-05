@@ -11,7 +11,7 @@ from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 import time
 from PIL import Image
-from gan_dataloader import GANDIV2KDataLoader
+from dataloader import GANDIV2KDataLoader
 from utils.save_checkpoint_diff import save_checkpoint
 from transformer import SwinIR
 import torchvision.transforms.functional as TF
@@ -19,13 +19,14 @@ import torchvision.transforms as T
 import random
 from fvcore.nn import FlopCountAnalysis
 from torchvision.transforms import v2
+import lpips
 
 # Alert messages
-import alert
+# import alert
 
 def main():
     config = {
-        'embed_dim': 64,
+        'embed_dim': 128,
         'upscale': 8,
     }
 
@@ -33,11 +34,10 @@ def main():
 
     # Load and preprocess the dataset
     basic_transforms_Hr = T.Compose([
-        T.ToTensor(),       # Converts [0, 255] to [0.0, 1.0]
+        T.ToTensor(),
     ])
     basic_transforms_Lr = T.Compose([
         T.ToTensor(),  
-        v2.GaussianNoise(mean=0.0, sigma=0.2, clip=True)
     ])
 
     datasetRoot = "DIV2K"
@@ -52,7 +52,7 @@ def main():
         transformHr=basic_transforms_Hr,
         mode="val",
         batch_size=4,
-        scale=8,
+        scale=config['upscale'],
     )
 
     val_loader = torch.utils.data.DataLoader(
@@ -70,17 +70,15 @@ def main():
                      ).to(device)
 
 
-    checkpoint = "ckpt_PSNR_20.8705.pth"
+    checkpoint = "ckpt_PSNR_21.9209.pth"
     checkpointPath = "super-resolution-model-tests/transformer/training_checkpoints/"+checkpoint
 
     state_dict = torch.load(checkpointPath, map_location=device)
     model.load_state_dict(state_dict['model_state_dict'])
 
-    scale = 8
-
     model.eval()
 
-    visualise_validation_set(val_loader, model, device, scale)
+    visualise_validation_set(val_loader, model, device, config['upscale'])
 
 def compute_psnr(img1, img2, max_val=1.0):
     mse = F.mse_loss(img1, img2)
@@ -94,40 +92,47 @@ def compute_flops(model, img, device='cuda'):
     print(f"Approximate FLOPs: {total_flops / 1e9:.2f} GFLOPs")
 
 def visualise_validation_set(val_loader, model, device, scale):
-    image_dir = 'super-resolution-model-tests/test_vals/transformer/generated_image'
+    image_dir = 'super-resolution-model-tests/test_vals/transformer/16x/generated_image'
     total_psnr = 0.0
     total_ssim = 0.0
+    total_lpips = 0.0
     count = 0
     imageChosen = None
     scale_factor = val_loader.dataset.scale
     imageChosenNum = [0, 50, 70]
+
+    # SSIM setup
     ssim_loss_fn = SSIMLoss().to(device)
+    
+    # LPIPS setup
+    lpips_loss_fn = lpips.LPIPS(net='alex').to(device)
+    norm = T.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
 
     total_start = time.time()
+
     # Loop over the entire validation loader
     for idx, (lr_img_full, hr_img_full) in enumerate(val_loader):
         
         _, _, H_lr, W_lr = lr_img_full.shape
         
         TILE_SIZE = 128
-        OVERLAP = 32  # Define overlap amount (e.g., 25% of tile size)
+        OVERLAP = 32
         STRIDE = TILE_SIZE - OVERLAP
 
-        # Create tensors to store the stitched image and a counter
+        # Create tensors to store the stitched image
         H_sr = H_lr * scale_factor
         W_sr = W_lr * scale_factor
         sr_img_stitched = torch.zeros(hr_img_full.shape[1], H_sr, W_sr, dtype=hr_img_full.dtype).to(device)
         stitch_counter = torch.zeros(hr_img_full.shape[1], H_sr, W_sr, dtype=hr_img_full.dtype).to(device)
 
         with torch.no_grad():
-            # Loop with STRIDE instead of TILE_SIZE
             for h_start in range(0, H_lr, STRIDE):
                 for w_start in range(0, W_lr, STRIDE):
                     # Define LR patch coordinates
                     h_end = min(h_start + TILE_SIZE, H_lr)
                     w_end = min(w_start + TILE_SIZE, W_lr)
                     
-                    # Adjust start if we are at the end to ensure full tile size
+                    # Adjust start
                     h_start_actual = max(0, h_end - TILE_SIZE)
                     w_start_actual = max(0, w_end - TILE_SIZE)
 
@@ -137,20 +142,17 @@ def visualise_validation_set(val_loader, model, device, scale):
                     # Generate SR patch
                     sr_patch = model(lr_patch).squeeze(0) # Keep on device for now
 
-                    # Define SR patch coordinates
                     h_start_sr = h_start_actual * scale_factor
                     h_end_sr = h_end * scale_factor
                     w_start_sr = w_start_actual * scale_factor
                     w_end_sr = w_end * scale_factor
 
-                    # Add patch to stiched image and increment counter
+                    # Add patch to stiched image
                     sr_img_stitched[:, h_start_sr:h_end_sr, w_start_sr:w_end_sr] += sr_patch
                     stitch_counter[:, h_start_sr:h_end_sr, w_start_sr:w_end_sr] += 1.0
 
-        # Divide by counter to average overlapping regions
         sr_img_stitched /= stitch_counter
 
-        # Move back to CPU for final processing
         sr_img_stitched = sr_img_stitched.cpu()
         hr_img_vis = hr_img_full.squeeze(0).clamp(0, 1)
         sr_img_vis = sr_img_stitched.clamp(0, 1)
@@ -161,16 +163,23 @@ def visualise_validation_set(val_loader, model, device, scale):
         hr_img_vis = hr_img_vis[:, :H, :W]
         sr_img_vis = sr_img_vis[:, :H, :W]
 
-        # Calculate PSNR for this image
+        # Calculate Metrics
         psnr_sr = compute_psnr(hr_img_vis, sr_img_vis)
         ssim_loss = ssim_loss_fn(sr_img_vis.unsqueeze(0), hr_img_vis.unsqueeze(0))
         total_ssim += (1- ssim_loss)
+
+        ref_input = norm(hr_img) 
+        pred_input = norm(sr_img)
+        
+        with torch.no_grad():
+            lpips_score = lpips_loss_fn(pred_input, ref_input)
     
-        # Accumulate PSNR
+        # Accumulate metrics
         total_psnr += psnr_sr
+        total_lpips += lpips_score.item()
         count += 1
 
-        # Grid
+        # Save image
         if idx in imageChosenNum:
             image = (sr_img_vis.permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
             filename = f"{image_dir}/image_{idx}.png"
@@ -179,15 +188,16 @@ def visualise_validation_set(val_loader, model, device, scale):
 
     avg_psnr = total_psnr / count if count > 0 else 0.0
     avg_ssim = total_ssim / count
+    avg_lpips = total_lpips / count if count > 0 else 0.0
     avg_time = (time.time() - total_start) / count
 
-    alert.send_notification(f"Transformer test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
+    # alert.send_notification(f"Transformer test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
 
     compute_flops(model, torch.randn(1, 3, 64, 64).to(device))
 
 
     # Print Final PSNR value
-    print(f"Transformer test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg Time {avg_time:.2f} sec")
+    print(f"Transformer test complete: Avg PSNR {avg_psnr:.2f}, Avg SSIM {avg_ssim:.2f}, Avg LPIPS {avg_lpips:.2f}, Avg Time {avg_time:.2f} sec")
 
 
 def gaussian_window(window_size, sigma, channels):
@@ -195,11 +205,9 @@ def gaussian_window(window_size, sigma, channels):
     g = torch.exp(-(coords**2) / (2 * sigma * sigma))
     g = g / g.sum()
 
-    # 2D gaussian
     g2d = g[:, None] * g[None, :]
     g2d = g2d / g2d.sum()
 
-    # shape: (C, 1, k, k)
     window = g2d.expand(channels, 1, window_size, window_size).contiguous()
     return window
 
@@ -209,12 +217,11 @@ class SSIMLoss(nn.Module):
         super().__init__()
         self.window_size = window_size
         self.sigma = sigma
-        self.register_buffer("window", None)  # will initialize later
+        self.register_buffer("window", None)
 
     def forward(self, img1, img2):
         B, C, H, W = img1.shape
 
-        # Create gaussian window on first use or when channels change
         if self.window is None or self.window.size(0) != C:
             window = gaussian_window(self.window_size, self.sigma, C)
             self.window = window.to(img1.device).to(img1.dtype)
@@ -234,7 +241,7 @@ class SSIMLoss(nn.Module):
 
         ssim = ssim_map.mean()
 
-        return 1 - ssim     # loss
+        return 1 - ssim    
 
 
 

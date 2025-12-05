@@ -20,7 +20,6 @@ class PatchUnEmbed(nn.Module):
         return self.conv(x)
 
 
-# --- FIXED WINDOW FUNCTIONS ---
 def window_partition(x, window_size):
     """
     Args:
@@ -29,12 +28,8 @@ def window_partition(x, window_size):
         windows: (num_windows*B, window_size*window_size, C)
     """
     B, H, W, C = x.shape
-    # 1. Reshape to separate windows (Safe for non-contiguous memory)
     x = x.reshape(B, H // window_size, window_size, W // window_size, window_size, C)
     
-    # 2. Permute and Flatten
-    # Output becomes: (Batch*NumWindows, WindowArea, Channels)
-    # e.g., (-1, 64, 64) for 8x8 window
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size * window_size, C)
     return windows
 
@@ -70,11 +65,9 @@ class WindowAttention(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x):
-        # x shape: (B_, N, C)
         B_, N, C = x.shape
         
         # Reshape for multi-head attention
-        # (B_, N, 3, Heads, HeadDim)
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
@@ -125,7 +118,7 @@ class SwinBlock(nn.Module):
         x = self.norm1(x)
         x = x.view(B, H, W, C)
 
-        # 1. PADDING (Prevents Crashes on Odd Sizes)
+        # Padding
         pad_l = pad_t = 0
         pad_r = (self.window_size - W % self.window_size) % self.window_size
         pad_b = (self.window_size - H % self.window_size) % self.window_size
@@ -134,22 +127,18 @@ class SwinBlock(nn.Module):
         
         _, Hp, Wp, _ = x.shape
 
-        # 2. Partition
         x_windows = window_partition(x, self.window_size)
         
-        # 3. Attention
         attn_windows = self.attn(x_windows) 
 
-        # 4. Reverse
         x = window_reverse(attn_windows, self.window_size, Hp, Wp) 
 
-        # 5. Remove Padding
+        #  Remove Padding
         if pad_r > 0 or pad_b > 0:
             x = x[:, :H, :W, :]
 
-        x = x.view(B, H * W, C)
+        x = x.reshape(B, H * W, C)
 
-        # FFN
         x = shortcut + x
         x = x + self.mlp(self.norm2(x))
         return x
@@ -183,17 +172,15 @@ class Upsample(nn.Module):
             m.append(nn.PixelShuffle(2))
         elif scale == 3:
             m.append(nn.PixelShuffle(3))
-        elif scale == 4:
+        if scale >= 4:
             m.append(nn.Conv2d(dim, dim * 4, 3, 1, 1))
             m.append(nn.PixelShuffle(2))
             m.append(nn.Conv2d(dim, dim * 4, 3, 1, 1))
             m.append(nn.PixelShuffle(2))
-        elif scale == 8:
-            # 8x Upscaling Logic
+        if scale >= 8:
             m.append(nn.Conv2d(dim, dim * 4, 3, 1, 1))
             m.append(nn.PixelShuffle(2))
-            m.append(nn.Conv2d(dim, dim * 4, 3, 1, 1))
-            m.append(nn.PixelShuffle(2))
+        if scale == 16:
             m.append(nn.Conv2d(dim, dim * 4, 3, 1, 1))
             m.append(nn.PixelShuffle(2))
             
@@ -207,9 +194,9 @@ class SwinIR(nn.Module):
     def __init__(
         self,
         in_ch=3,
-        embed_dim=64, # Default 64
+        embed_dim=64,
         depths=[6, 6, 6, 6],
-        num_heads=[4, 4, 4, 4], # Default 4 heads (Divides 64 and 128 evenly)
+        num_heads=[4, 4, 4, 4],
         window_size=8,
         upscale=8,
     ):
@@ -243,7 +230,7 @@ class SwinIR(nn.Module):
         # shallow features
         x = self.shallow_cnn(x)
         feat = self.patch_embed(x)
-        feat = feat.flatten(2).transpose(1, 2) # (B, L, C)
+        feat = feat.flatten(2).transpose(1, 2)
 
         # deep features
         for layer in self.layers:

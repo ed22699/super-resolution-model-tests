@@ -1,4 +1,5 @@
 import os
+import torch.nn.functional as F
 import random
 import re
 import torch
@@ -6,7 +7,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 
 
-class DIV2KDataLoader(Dataset):
+class GANDIV2KDataLoader(Dataset):
     """
     A PyTorch `Dataset` class for DIV2K related challenges
 
@@ -33,7 +34,7 @@ class DIV2KDataLoader(Dataset):
         In training mode, the size of the random cropping window
     """
 
-    def __init__(self, root_dir_lr, root_dir_hr, transform=None, mode='train', 
+    def __init__(self, root_dir_lr, root_dir_hr, transformLr=None, transformHr=None, mode='train', 
                  batch_size=None, scale = 8, patch_size = 64):
         """
         Initialize the ProgressionDataset.
@@ -55,7 +56,8 @@ class DIV2KDataLoader(Dataset):
         patch_size : int
             In training mode, the size of the random cropping window
         """
-        self.transform = transform
+        self.transformLr = transformLr
+        self.transformHr = transformHr
         self.batch_size = batch_size
         self.mode = mode
         self.root_dir_lr = root_dir_lr
@@ -63,11 +65,11 @@ class DIV2KDataLoader(Dataset):
         self.scale = scale
         self.patch_size = patch_size
 
-        # Iterate through recipe folders and collect ordered step images
-        self.lr_image_files = [f for f in os.listdir(
-            root_dir_lr) if f.lower().endswith('.png')]
-        self.hr_image_files = [f for f in os.listdir(
-            root_dir_hr) if f.lower().endswith('.png')]
+        # Order the two folders
+        self.lr_image_files = sorted([f for f in os.listdir(
+            root_dir_lr) if f.lower().endswith('.png')])
+        self.hr_image_files = sorted([f for f in os.listdir(
+            root_dir_hr) if f.lower().endswith('.png')])
 
         self.lr_image_files.sort()
         self.hr_image_files.sort()
@@ -94,13 +96,15 @@ class DIV2KDataLoader(Dataset):
         lr_crop = lr_img.crop((x, y, x + self.patch_size, y + self.patch_size))
 
         # Match crop for hr img
-        x_hr = x * self.scale
-        y_hr = y * self.scale
+        file_scale = 8
+
+        x_hr = x * file_scale
+        y_hr = y * file_scale
         hr_crop = hr_img.crop((
             x_hr,
             y_hr,
-            x_hr + (self.patch_size * self.scale),
-            y_hr + (self.patch_size * self.scale),
+            x_hr + (self.patch_size * file_scale),
+            y_hr + (self.patch_size * file_scale),
         ))
         return lr_crop, hr_crop
 
@@ -157,11 +161,7 @@ class DIV2KDataLoader(Dataset):
                 raise ValueError(
                     "In 'val'/'test' mode, 'idx' must be provided.")
             img_lr_path = self.lr_image_files[idx]
-            code = img_lr_path[:4]
-            for item in self.hr_image_files:
-                if item[:4] == code:
-                    img_hr_path = item
-                    break
+            img_hr_path = self.hr_image_files[idx]
 
         img_lr = Image.open(self.root_dir_lr + "/" + img_lr_path).convert("RGB")
         img_hr = Image.open(self.root_dir_hr + "/" + img_hr_path).convert("RGB")
@@ -170,8 +170,12 @@ class DIV2KDataLoader(Dataset):
         if self.mode == 'train':
             img_lr, img_hr = self._generate_random_crop(img_lr, img_hr)
 
-        if self.transform:
-            img_lr = self.transform(img_lr)
-            img_hr = self.transform(img_hr)
+        if self.transformLr:
+            img_lr = self.transformLr(img_lr)
+        if self.transformHr:
+            img_hr = self.transformHr(img_hr)
+
+        if self.scale == 16:
+             img_lr = F.interpolate( img_lr.unsqueeze(0), scale_factor=0.5, mode="bicubic", align_corners=False).squeeze(0)
 
         return img_lr, img_hr

@@ -15,7 +15,7 @@ import time
 from PIL import Image
 from transformer import SwinIR
 from utils.save_checkpoint_diff import save_checkpoint
-from gan_dataloader import GANDIV2KDataLoader
+from dataloader import GANDIV2KDataLoader
 import torchvision.transforms.functional as TF
 import torchvision.transforms as T
 import random
@@ -23,7 +23,7 @@ import argparse
 from torchvision.transforms import v2
 
 # Alert messages
-import alert
+# import alert
 
 
 parser = argparse.ArgumentParser(
@@ -59,10 +59,9 @@ def main(args):
     # Load and preprocess the dataset
     basic_transforms_Lr = T.Compose([
         T.ToTensor(),  
-        v2.GaussianNoise(mean=0.0, sigma=0.3, clip=True)
     ])
     basic_transforms_Hr = T.Compose([
-        T.ToTensor(),       # Converts [0, 255] to [0.0, 1.0]
+        T.ToTensor(),      
     ])
 
     datasetRoot = "DIV2K"
@@ -76,7 +75,7 @@ def main(args):
         transformHr=basic_transforms_Hr,
         mode="train",
         batch_size=16,
-        scale=8,
+        scale=args.upscale,
         patch_size=64,
     )
 
@@ -90,7 +89,7 @@ def main(args):
         transformHr=basic_transforms_Hr,
         mode="val",
         batch_size=4,
-        scale=8,
+        scale=args.upscale,
     )
 
     train_loader = torch.utils.data.DataLoader(
@@ -109,6 +108,7 @@ def main(args):
     )
 
 
+    # Initialise model
     model = SwinIR(in_ch = 3,
                      embed_dim=args.embed_dim,
                      upscale = args.upscale
@@ -129,7 +129,7 @@ def main(args):
     trainer = Trainer(loss_func, model, scheduler, train_loader, val_loader, optimizer, device, args.epochs)
     trainer.loopEpochs(args.epochs)
 
-    alert.send_notification(f"Training finished for Transformer")
+    # alert.send_notification(f"Training finished for Transformer")
 
 class Trainer:
     def __init__(self, loss_func, model, scheduler, train_loader, val_loader, optimizer, device, epochs):
@@ -201,13 +201,12 @@ class Trainer:
         scale_factor = self.val_loader.dataset.scale
 
         # Loop over the entire validation loader
-
         for idx, (lr_img_full, hr_img_full) in enumerate(self.val_loader):
             
             _, _, H_lr, W_lr = lr_img_full.shape
             
             TILE_SIZE = 128
-            OVERLAP = 32  # Define overlap amount (e.g., 25% of tile size)
+            OVERLAP = 32 
             STRIDE = TILE_SIZE - OVERLAP
 
             # Create tensors to store the stitched image and a counter
@@ -217,14 +216,13 @@ class Trainer:
             stitch_counter = torch.zeros(hr_img_full.shape[1], H_sr, W_sr, dtype=hr_img_full.dtype).to(self.device)
 
             with torch.no_grad():
-                # Loop with STRIDE instead of TILE_SIZE
                 for h_start in range(0, H_lr, STRIDE):
                     for w_start in range(0, W_lr, STRIDE):
                         # Define LR patch coordinates
                         h_end = min(h_start + TILE_SIZE, H_lr)
                         w_end = min(w_start + TILE_SIZE, W_lr)
                         
-                        # Adjust start if we are at the end to ensure full tile size
+                        # Adjust start
                         h_start_actual = max(0, h_end - TILE_SIZE)
                         w_start_actual = max(0, w_end - TILE_SIZE)
 
@@ -232,7 +230,7 @@ class Trainer:
                         lr_patch = lr_img_full[:, :, h_start_actual:h_end, w_start_actual:w_end].to(self.device)
                     
                         # Generate SR patch
-                        sr_patch = self.model(lr_patch).squeeze(0) # Keep on device for now
+                        sr_patch = self.model(lr_patch).squeeze(0)
 
                         # Define SR patch coordinates
                         h_start_sr = h_start_actual * scale_factor
@@ -240,14 +238,12 @@ class Trainer:
                         w_start_sr = w_start_actual * scale_factor
                         w_end_sr = w_end * scale_factor
 
-                        # Add patch to stiched image and increment counter
+                        # Add patch to stiched image
                         sr_img_stitched[:, h_start_sr:h_end_sr, w_start_sr:w_end_sr] += sr_patch
                         stitch_counter[:, h_start_sr:h_end_sr, w_start_sr:w_end_sr] += 1.0
 
-            # Divide by counter to average overlapping regions
             sr_img_stitched /= stitch_counter
 
-            # Move back to CPU for final processing
             sr_img_stitched = sr_img_stitched.cpu()
             hr_img_vis = hr_img_full.squeeze(0).clamp(0, 1)
             sr_img_vis = sr_img_stitched.clamp(0, 1)
@@ -282,7 +278,7 @@ class Trainer:
         if self.best_psnr < avg_psnr:
             self.best_psnr = avg_psnr
             save_checkpoint(epoch, avg_psnr, self.model, self.checkpoint_dir)
-            alert.send_notification(f"New best AVG PSNR: Epoch {epoch + 1}  PSNR: {avg_psnr:.2f}")
+            # alert.send_notification(f"New best AVG PSNR: Epoch {epoch + 1}  PSNR: {avg_psnr:.2f}")
             filename = f"{self.image_dir}/top_image.png"
             Image.fromarray(first_image_grid).save(filename)
 
